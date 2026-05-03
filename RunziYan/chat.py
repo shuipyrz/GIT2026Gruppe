@@ -9,4 +9,4 @@ if prompt:
     user_message.write(prompt)
 
     ai_message = st.chat_message("ai")
-    ai_message.write(“Hallo")
+    ai_message.write("Hallo")
