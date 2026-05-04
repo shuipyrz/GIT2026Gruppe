@@ -4,7 +4,7 @@ from streamlit_folium import st_folium
 from backend import agent_app
 
 st.set_page_config(layout="wide", page_title="GeoGPT DeepSeek")
-st.title("🗺️ GeoGPT Kartenerstellung")
+st.title("Chatbot für Kartenerstellung")
 
 # 初始化 Session
 if "messages" not in st.session_state:
@@ -81,3 +81,4 @@ if user_query:
     
     # 运行完毕后刷新页面显示新结果
     st.rerun()
+    
