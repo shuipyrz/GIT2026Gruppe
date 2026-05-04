@@ -2,7 +2,7 @@ import streamlit as st
 
 st.title ("Kartenerstellung")
 
-prompt = st.chat_input("请输入内容")
+prompt = st.chat_input("Bitte geben Sie Ihren Inhalt ein.")
 
 if prompt:
     user_message = st.chat_message("user")
