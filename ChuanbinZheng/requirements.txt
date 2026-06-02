@@ -1,6 +1,7 @@
 streamlit
 folium
 streamlit-folium
-python-dotenv
-langchain
 langchain-openai
+langgraph
+python-dotenv
+pandas
