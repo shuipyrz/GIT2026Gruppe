@@ -21,7 +21,7 @@ if "layers" not in st.session_state: st.session_state.layers = []
 if "processed_files" not in st.session_state: st.session_state.processed_files = set()
 if "map_style" not in st.session_state: st.session_state.map_style = DEFAULT_MAP_STYLE.copy()
 if "view_updates" not in st.session_state: st.session_state.view_updates = {}
-# 🌟 新增地图渲染键，用于物理强制刷新视图组件
+#  新增地图渲染键，用于物理强制刷新视图组件
 if "map_key" not in st.session_state: st.session_state.map_key = 0
 
 # %%
@@ -87,7 +87,7 @@ with col1:
 with col2:
     st.subheader("Interaktive Karte")
     m = create_layered_map(st.session_state.layers, st.session_state.view_updates)
-    # 🌟 核心修复：通过绑定变化的 map_key，强行摧毁旧 Folium 缓存，迫使地图根据最新样式和完美自适应边界重绘！
+    #  核心修复：通过绑定变化的 map_key，强行摧毁旧 Folium 缓存，迫使地图根据最新样式和完美自适应边界重绘！
     st_folium(m, width="100%", height=600, key=f"map_instance_{st.session_state.map_key}")
 
 # %%
@@ -127,7 +127,7 @@ if user_query:
                     "content": "Neue Geodaten wurden generiert und die Ansicht optimal angepasst!"
                 })
             else:
-                # 🌟 核心修复：样式更新精准指向列表末尾最新的独立图层快照
+                #  核心修复：样式更新精准指向列表末尾最新的独立图层快照
                 if st.session_state.layers:
                     st.session_state.layers[-1]["style"] = copy.deepcopy(st.session_state.map_style)
                 st.session_state.messages.append({
@@ -135,7 +135,7 @@ if user_query:
                     "content": "Kartenansicht aktualisiert und Stil angewendet!"
                 })
             
-            # 🌟 强制递增渲染键，告诉 Streamlit 这一轮数据流变了，必须重新绘制图层颜色！
+            #  强制递增渲染键，告诉 Streamlit 这一轮数据流变了，必须重新绘制图层颜色！
             st.session_state.map_key += 1
         else:
             st.session_state.messages.append({"role": "assistant", "content": f"Fehler: {result.get('error_message')}"})
