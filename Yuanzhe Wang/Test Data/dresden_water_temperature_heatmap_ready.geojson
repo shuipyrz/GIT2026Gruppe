@@ -1,0 +1,111 @@
+{
+  "type": "FeatureCollection",
+  "name": "dresden_water_temperature_points",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          13.840958514866553,
+          51.00024136996407
+        ]
+      },
+      "properties": {
+        "name": "Johnsdorfer Str./Pflegeheim Bierweg, Flst. 82/1, L 2/94",
+        "station_id": 32628,
+        "temperature": 11.9,
+        "t1": 11.9,
+        "unit": "°C",
+        "parameter": "Wassertemperatur(T1) 1m unter WSP",
+        "date": "27.05.2021 00:00:00",
+        "lat": 51.00024136996407,
+        "lon": 13.840958514866553
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          13.75145993021425,
+          51.037308527336705
+        ]
+      },
+      "properties": {
+        "name": "Tiergartenstraße neben Zoo, Flst. 622/4, L 12/94",
+        "station_id": 33177,
+        "temperature": 13.3,
+        "t1": 13.3,
+        "unit": "°C",
+        "parameter": "Wassertemperatur(T1) 1m unter WSP",
+        "date": "20.05.2021 00:00:00",
+        "lat": 51.037308527336705,
+        "lon": 13.75145993021425
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          13.734654004879406,
+          51.042248119654246
+        ]
+      },
+      "properties": {
+        "name": "Wiener Platz Dresden (B6/97), westl. Hotel Newa, Höhe Eingang Restaurant",
+        "station_id": 36226,
+        "temperature": 16.4,
+        "t1": 16.4,
+        "unit": "°C",
+        "parameter": "Wassertemperatur(T1) 1m unter WSP",
+        "date": "20.05.2021 00:00:00",
+        "lat": 51.042248119654246,
+        "lon": 13.734654004879406
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          13.747704883221886,
+          51.09341140978665
+        ]
+      },
+      "properties": {
+        "name": "P. H-Kippe Hammerweg (Hy D/11/91)",
+        "station_id": 35028,
+        "temperature": 10.9,
+        "t1": 10.9,
+        "unit": "°C",
+        "parameter": "Wassertemperatur(T1) 1m unter WSP",
+        "date": "19.05.2021 00:00:00",
+        "lat": 51.09341140978665,
+        "lon": 13.747704883221886
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          13.763503629246667,
+          51.07801933550455
+        ]
+      },
+      "properties": {
+        "name": "P. Stadthalle",
+        "station_id": 35037,
+        "temperature": 11.8,
+        "t1": 11.8,
+        "unit": "°C",
+        "parameter": "Wassertemperatur(T1) 1m unter WSP",
+        "date": "25.05.2021 00:00:00",
+        "lat": 51.07801933550455,
+        "lon": 13.763503629246667
+      }
+    }
+  ]
+}
