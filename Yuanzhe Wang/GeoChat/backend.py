@@ -705,4 +705,246 @@ def parse_csv_points(df):
 
     return points
 
+# ==========================================
+# zheng BLOCK 8: Karte exportieren
+# ==========================================
+from branca.element import Element
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+import time
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.utils import ImageReader
+
+# 添加标题
+def Titel_hinzufügen(m:folium.Map,titel:str) -> None:
+    title_html = f'''
+    <div style="
+        position: fixed;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 9999;
+        background-color: white;
+        padding: 8px 15px;
+        border-radius: 6px;
+        font-size: 30px;
+        font-weight: bold;
+        box-shadow: 0 0 6px rgba(0,0,0,0.3);
+    ">
+        {titel}
+    </div>
+    '''
+    m.get_root().html.add_child(Element(title_html))
+
+#根据HTML创建图片
+def html_to_png(html:str,png:str) -> None:
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--window-size=1200,800")
+    driver = webdriver.Chrome(options=options)
+    driver.get("file://" + os.path.abspath(html))
+    time.sleep(0.1)  # wait...
+    driver.save_screenshot(png)
+    driver.quit()
+
+#根据图片创建PDF
+def png_to_pdf(png:str,pdf:str) -> None:
+    c = canvas.Canvas(pdf, pagesize=landscape(A4))
+    page_width, page_height = landscape(A4)
+    img = ImageReader(png)
+    img_width, img_height = img.getSize()
+    ratio = min(page_width / img_width, page_height / img_height)
+    new_width = img_width * ratio
+    new_height = img_height * ratio
+    x = (page_width - new_width) / 2
+    y = (page_height - new_height) / 2
+    c.drawImage(png, x, y, width=new_width, height=new_height)
+    c.save()
+
+TOOLS = [
+    {
+        "name": "create_map",
+        "description": "Karte erstellen (Heatmap oder Choropleth)"
+    },
+    {
+        "name": "set_title",
+        "description": "Titel zurückgeben"
+    },
+    {
+        "name": "export_map",
+        "description": "Karte exportieren"
+    }
+]
+
+
+def parse_intent(text: str):
+    """
+    Analysieren Anforderungen der Nutzer:innen
+    """
+    
+    tool_text = "\n".join(
+    f"- {t['name']}: {t['description']}"
+    for t in TOOLS
+)
+    system_prompt = f"""
+        Du bist ein GIS-Assistent.
+
+        Folgende Tools stehen zur Verfügung:
+
+        {tool_text}
+
+        Gib nur JSON zurück:
+
+        {{
+        "tool": "<tool_name>"
+        }}
+
+        Wenn kein Tool passt:
+        {{
+        "tool": "error"
+        }}
+
+        Nur JSON ausgeben.
+        """
+
+    response = llm.invoke([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": text}
+    ])
+
+    result = response.content.strip()
+    return json.loads(result)
+
+def get_selected_layer_name(user_text: str,layers):
+    """
+    Bestimmen den Ziellayer
+    """
+
+    layer_names = "\n".join([l["name"] for l in layers])
+    system_prompt = f"""
+        Du bist ein GIS-Assistent.
+
+        Der Benutzer kann Kartenlayer verwalten oder auswählen.
+
+        Layer werden vom Nutzer bereitgestellt.
+
+        Deine Aufgabe ist es, den am besten passenden Layer anhand der Benutzeranfrage auszuwählen.
+
+        Regeln:
+        - Gib nur den Namen eines Layers zurück
+        - Antworte ausschließlich im JSON-Format
+        - Kein zusätzlicher Text
+
+        Format:
+
+        {{
+        "layer_name": "<name>"
+        }}
+
+        WICHTIG:
+        - Wenn kein passender Layer gefunden wird, wähle den letzten Layer aus der Liste.
+        """
+
+    response = llm.invoke([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"{user_text}\n\n{layer_names}"}
+    ])
+
+    result = json.loads(response.content.strip())
+    return result["layer_name"]
+
+def set_selected_layer_name(layer):
+    """
+    Geben dem Layer einen geeigneten Name
+    """
+
+    system_prompt = """
+        Du bist ein GIS-Assistent.
+
+        Du erhältst Informationen über einen Layer.
+
+        Deine Aufgabe:
+        Gib nur einen passenden Layer-Namen zurück.
+
+        Antworte nur im JSON-Format:
+
+        {
+        "title": "<title>"
+        }
+
+        Keine Erklärungen.
+        """
+
+    minimal_layer = {
+    "name": layer["name"],
+    "type": layer["type"],
+}
+    content = json.dumps(minimal_layer, ensure_ascii=False, indent=2)
+
+    response = llm.invoke([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": content}
+    ])
+
+    result = json.loads(response.content.strip())
+    return result["title"]
+
+SUPPORTED_MAP_TYPES = [
+    "points",
+    "line",
+    "polygon",
+    "heatmap",
+    "choropleth"
+]
+
+def bestimmen_Kartentyp(user_text: str,layer):
+    """
+    bestimmen den Typ der erstllten Karte
+    """
+
+    system_prompt = f"""
+        Du bist ein GIS-Assistent.
+
+        Bitte analysiere die Benutzeranfrage sowie die Informationen der Geo-Datenstruktur und bestimme den gewünschten Kartentyp.
+
+        Unterstützte Kartentypen:
+        {SUPPORTED_MAP_TYPES}
+
+        Ausgabeformat (immer gleich!):
+
+        {{
+            "type": "<type>",
+            "data_field": "<field or null>"
+        }}
+
+        Regeln:
+
+        1. Gib ausschließlich ein gültiges JSON-Objekt zurück.
+        Keine Erklärungen, kein Markdown, kein zusätzlicher Text.
+        2. Die Ausgabe MUSS immer sowohl "type" als auch "data_field" enthalten.
+        3. Für Basiskartentypen (point, line, polygon) setze "data_field" auf null.
+        4. Heatmap ist nur erlaubt, wenn layer.type == "point".
+        5. Choropleth ist nur erlaubt, wenn layer.type == "polygon".
+        6. Für Heatmap und Choropleth darf "data_field" niemals null sein.
+        7. "data_field" muss aus den verfügbaren Feldern (data_fields) gewählt werden.
+        Eigene oder erfundene Feldnamen sind nicht erlaubt.
+        8. Wenn der Benutzer ein bestimmtes Feld angibt, soll dieses bevorzugt verwendet werden.
+        Andernfalls wähle das geeignetste Feld aus den verfügbaren Daten.
+        """
+
+    minimal_layer = {
+    "name": layer["name"],
+    "type": layer["type"],
+    "data_fields": layer["data_fields"],
+}
+    content = json.dumps(minimal_layer, ensure_ascii=False, indent=2)
+
+    response = llm.invoke([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"{user_text}\n\n{content}"}
+    ])
+
+    result = json.loads(response.content.strip())
+    return result
 # %%
