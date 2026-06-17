@@ -728,7 +728,7 @@ def Titel_hinzufügen(m:folium.Map,titel:str) -> None:
         background-color: white;
         padding: 8px 15px;
         border-radius: 6px;
-        font-size: 30px;
+        font-size: 18px;
         font-weight: bold;
         box-shadow: 0 0 6px rgba(0,0,0,0.3);
     ">
@@ -774,6 +774,18 @@ TOOLS = [
     {
         "name": "export_map",
         "description": "Karte exportieren"
+    },
+    {
+        "name": "Kartenstil_anpassen",
+        "description": "Ändern den Kartenstil in einem bestimmten Layer"
+    },
+    {
+        "name": "Layer_verwalten",
+        "description": "Füge neue Layer hinzu, entferne oder kopiere bestehende Layer."
+    },
+    {
+        "name": "Geodatei_analysieren",
+        "description": "Analysiert die Struktur und den Inhalt einer Geodatendatei und erklärt die enthaltenen Informationen."
     }
 ]
 
@@ -860,26 +872,38 @@ def set_selected_layer_name(layer):
     """
 
     system_prompt = """
-        Du bist ein GIS-Assistent.
+        Du bist ein kreativer GIS-Assistent.
 
-        Du erhältst Informationen über einen Layer.
+        Du erhältst Informationen über einen geographischen Layer.
 
         Deine Aufgabe:
-        Gib nur einen passenden Layer-Namen zurück.
+        Erzeuge einen passenden, anschaulichen und gut klingenden MAP TITEL.
+
+        Der Titel soll:
+        - beschreibend sein
+        - nicht nur den Dateinamen wiederholen
+        - etwas menschlicher und natürlicher klingen
+        - optional den Kontext oder die Bedeutung des Layers ausdrücken
 
         Antworte nur im JSON-Format:
 
         {
-        "title": "<title>"
+        "title": "<creative title>"
         }
 
         Keine Erklärungen.
         """
-
-    minimal_layer = {
-    "name": layer["name"],
-    "type": layer["type"],
-}
+    if "data_field" in layer:
+        minimal_layer = {
+        "name": layer["name"],
+        "data_field": layer["data_field"],
+        "type": layer["type"],
+    }
+    else:
+        minimal_layer = {
+        "name": layer["name"],
+        "type": layer["type"],
+    }
     content = json.dumps(minimal_layer, ensure_ascii=False, indent=2)
 
     response = llm.invoke([
@@ -947,4 +971,175 @@ def bestimmen_Kartentyp(user_text: str,layer):
 
     result = json.loads(response.content.strip())
     return result
+
+def get_map_style(user_text: str,layer):
+
+    aktuell_style=json.dumps(layer["style"], ensure_ascii=False, indent=2)
+    system_prompt = f"""
+        Du bist ein GIS-Styling-Assistent für Folium (Leaflet).
+
+        Du erhältst den aktuellen Kartenstil :
+
+        DEFAULT_MAP_STYLE:
+        {aktuell_style}
+
+        Deine Aufgabe:
+        Passe diesen Style an, basierend auf der Benutzeranfrage.
+
+        REGELN (SEHR WICHTIG):
+        1. Ändere nur die Werte, nicht die Keys
+        2. KEINE neuen Felder hinzufügen
+        3. KEINE Felder entfernen
+        4. Alle Werte müssen aus den erlaubten Bereichen stammen
+        5. Wenn die Anfrage unklar ist → behalte den alten Wert
+
+        ERLAUBTE WERTE:
+
+        color / fillColor:
+        - "blue"
+        - "red"
+        - "green"
+        - "black"
+        - "orange"
+        - "purple"
+        - "gray"
+        - "yellow"
+
+        weight:
+        - ganze Zahlen von 1 bis 10
+
+        fillOpacity:
+        - Werte zwischen 0.0 und 1.0
+
+        OUTPUT FORMAT (streng):
+        {{
+        "color": "...",
+        "weight": ...,
+        "fillColor": "...",
+        "fillOpacity": ...
+        }}
+
+        Keine Erklärungen, nur JSON.
+        """
+
+    response = llm.invoke([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text}
+    ])
+
+    result = json.loads(response.content.strip())
+    return result
+
+def verwalten_layers(user_text: str,layers):
+
+    layer_names = "\n".join([l["name"] for l in layers])
+    system_prompt = """
+        Du bist ein GIS Layer Management Assistent.
+
+        Du erhältst:
+        - eine Liste aktueller Layer
+        - eine Benutzeranweisung
+
+        Deine Aufgabe:
+        Erzeuge die neue finale Layer-Liste nach der Benutzeranweisung.
+
+        REGELN:
+        1. Antworte nur im JSON-Format
+        2. Gib eine vollständige Liste der finalen Layer zurück
+        3. Jeder Layer muss eindeutig benannt sein
+        4. Keine Duplikate in "name"
+        5. Wenn ein Layer gelöscht werden soll → einfach NICHT in der Liste enthalten
+        6. Wenn ein Layer kopiert wird → füge einen neuen Layer mit neuem Namen hinzu
+        7. Wenn alle Layer gelöscht werden sollen:
+           → gib eine leere Liste zurück UND setze "state": "empty"
+        8. Reihenfolge beibehalten, außer Benutzer sagt etwas anderes
+        9. Keine zusätzlichen Felder oder Kommentare
+
+        OUTPUT FORMAT:
+
+        {
+        "state": "normal | empty",
+        "layers": [
+            {
+            "name": "<layer_name>",
+            "source": "<original_name>"
+            }
+        ]
+        }
+        """
+
+    response = llm.invoke([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"{user_text}, die Liste aktueller Layer:\n\n{layer_names}"}
+    ])
+
+    result = json.loads(response.content.strip())
+    
+    if result["state"] == "empty":
+        new_layers = []
+    else:
+        new_layers = result["layers"]
+    return new_layers
+
+def verstehen_Geodatei(user_text: str,layer):
+
+    data = layer["data"]
+    limit=10
+    if isinstance(data, list):
+        layer_data_sample = data[:limit]
+    elif isinstance(data, dict):
+        layer_data_sample = {}
+        for i, (key, value) in enumerate(data.items()):
+            if i >= limit:
+                break
+            layer_data_sample[key] = value
+    else:
+        layer_data_sample = data
+    sample=json.dumps(layer_data_sample, ensure_ascii=False, indent=2)
+    system_prompt = f"""
+        Du bist ein GIS-Datenanalyse-Assistent.
+
+        Du erhältst einen Ausschnitt einer Geodatendatei.
+
+        Deine Aufgaben:
+
+        1. Analysiere die Datenstruktur.
+        2. Erkläre die wichtigsten Attribute verständlich.
+        3. Fasse zusammen, welche Informationen der Datensatz enthält.
+        4. Empfiehl eine oder mehrere geeignete Kartentypen.
+
+        Die Anwendung unterstützt ausschließlich folgende Kartentypen:
+
+        {SUPPORTED_MAP_TYPES}
+
+        Für jede Empfehlung erkläre kurz, warum dieser Kartentyp geeignet ist.
+
+        Falls mehrere Kartentypen sinnvoll sind, sortiere sie nach ihrer Eignung.
+
+        Falls ein Kartentyp nicht geeignet ist, empfehle ihn nicht."""
+    
+        # REGELN:
+        # - Keine Programmierdetails
+        # - Keine unnötigen technischen Erklärungen
+        # - Fokus auf verständliche Erklärung
+        # - Antworte nur im JSON-Format
+
+        # FORMAT:
+
+        # {
+        # "type": "...",
+        # "feature_count": ...,
+        # "geometry_types": [...],
+        # "fields": {
+        #     "field_name": "meaning"
+        # },
+        # "summary": "..."
+        # }
+
+    response = llm.invoke([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"{user_text}, die Beispieldatei:\n\n{sample}"}
+    ])
+    
+    return response.content.strip()
 # %%
