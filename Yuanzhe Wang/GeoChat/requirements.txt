@@ -1,7 +1,0 @@
-streamlit
-folium
-streamlit-folium
-langchain-openai
-langgraph
-python-dotenv
-pandas
