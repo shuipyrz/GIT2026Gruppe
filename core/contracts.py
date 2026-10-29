@@ -103,6 +103,7 @@ class Layer:
     data_field: str | None = None
     style: dict = field(default_factory=dict)
     layer_id: str = field(default_factory=new_id)
+    visible: bool = True
 
 
 @dataclass(frozen=True)

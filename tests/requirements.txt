@@ -18,3 +18,5 @@ langchain-core==1.6.13
 langgraph==1.2.16
 pyproj==3.8.0
 httpx==0.28.1
+playwright==1.64.1
+pillow==13.0.0

@@ -50,6 +50,11 @@ class SessionData:
         self._layers = {}
         self._uploads = []
         self._results = []
+        self._show_basemap = True
+        self._basemap_revision = 0
+        self._map_title = ""
+        self._export_artifact = None
+        self._export_revision = 0
         self.raw_view = LegacyLayerView(self, False)
         self.map_view = LegacyLayerView(self, True)
 
@@ -67,6 +72,56 @@ class SessionData:
     def results(self):
         with self.lock:
             return deepcopy(self._results)
+
+    @property
+    def export_artifact(self):
+        with self.lock:
+            return deepcopy(self._export_artifact)
+
+    @property
+    def export_revision(self):
+        with self.lock:
+            return self._export_revision
+
+    def clear_export_artifact(self):
+        with self.lock:
+            self._export_artifact = None
+
+    def commit_export_artifact(self, artifact, *, message, tool_name):
+        with self.lock:
+            stored = {
+                "data": bytes(artifact["data"]),
+                "file_name": str(artifact["file_name"]),
+                "mime_type": str(artifact["mime_type"]),
+            }
+            result = ToolResult(True, message)
+            self._export_artifact = stored
+            self._export_revision += 1
+            self._results.append(result)
+            return deepcopy(result)
+
+    @property
+    def show_basemap(self):
+        with self.lock:
+            return self._show_basemap
+
+    @property
+    def map_title(self):
+        with self.lock:
+            return self._map_title
+
+    @property
+    def basemap_revision(self):
+        with self.lock:
+            return self._basemap_revision
+
+    def set_basemap_visibility(self, visible):
+        with self.lock:
+            visible = bool(visible)
+            if visible != self._show_basemap:
+                self._show_basemap = visible
+                self._basemap_revision += 1
+            return self._show_basemap
 
     def get_dataset(self, dataset_id):
         with self.lock:
@@ -107,8 +162,19 @@ class SessionData:
                       "data_field": l.data_field, "folium_kwargs": deepcopy(l.style),
                       "layer_id": l.layer_id, "dataset_id": l.dataset_id,
                       "crs": self._datasets[l.dataset_id].crs}
-                     for l in self._layers.values()]
+                     for l in self._layers.values() if l.visible]
             return raw, shown
+
+    @property
+    def layer_management_view(self):
+        """Return every displayed layer with its visibility for the UI controls."""
+        with self.lock:
+            payloads = {key: self._payload(dataset) for key, dataset in self._datasets.items()}
+            return [{"name": layer.name, "type": layer.renderer, "data": payloads[layer.dataset_id],
+                     "data_field": layer.data_field, "folium_kwargs": deepcopy(layer.style),
+                     "layer_id": layer.layer_id, "dataset_id": layer.dataset_id,
+                     "crs": self._datasets[layer.dataset_id].crs, "visible": layer.visible}
+                    for layer in self._layers.values()]
 
     def get_agent_layers(self):
         return self.raw_view, self.map_view
@@ -151,6 +217,12 @@ class SessionData:
         with self.lock:
             del self._layers[layer_id]  # Data survives other renderings and lineage.
 
+    def set_layer_visibility(self, layer_id, visible):
+        with self.lock:
+            layer = self._layers[layer_id]
+            self._layers[layer_id] = replace(layer, visible=bool(visible))
+            return self._layers[layer_id].visible
+
     def remove_upload(self, dataset_id):
         with self.lock:
             self._uploads.remove(dataset_id)  # Detach upload; displayed data survives.
@@ -178,6 +250,8 @@ class SessionData:
             self._layers.clear()
             self._uploads.clear()
             self._results.clear()
+            self._export_artifact = None
+            self._map_title = ""
 
     def replace_from_legacy(self, raw, shown):
         """Import an explicit old context into this session; retain no input refs."""
@@ -201,6 +275,7 @@ class SessionData:
         with self.lock:
             self._datasets, self._layers, self._uploads = replacement._datasets, replacement._layers, replacement._uploads
             self._results = []
+            self._map_title = ""
 
     @classmethod
     def from_legacy(cls, raw=(), shown=()):
@@ -257,6 +332,40 @@ class SessionData:
             self._results.append(result)
         return returned_result
 
+    def commit_map_action(self, action, *, message, tool_name):
+        """Apply a map-control command without rebuilding or validating data layers."""
+        with self.lock:
+            layers = dict(self._layers)
+            action_type = action.get("type")
+            if action_type == "remove":
+                layer_id = action.get("layer_id")
+                if layer_id not in layers:
+                    raise KeyError("Unknown layer reference")
+                del layers[layer_id]
+            elif action_type == "visibility":
+                layer_id = action.get("layer_id")
+                if layer_id not in layers:
+                    raise KeyError("Unknown layer reference")
+                layers[layer_id] = replace(layers[layer_id], visible=bool(action.get("visible")))
+                map_title = self._map_title
+            elif action_type == "title":
+                map_title = action.get("title")
+                if not isinstance(map_title, str) or not map_title.strip():
+                    raise ValueError("Map title must be a non-empty string")
+            elif action_type == "clear_title":
+                map_title = ""
+            else:
+                raise ValueError("Invalid map action")
+            if action_type in {"remove", "visibility"}:
+                map_title = self._map_title
+            result = ToolResult(True, message)
+            layers, result = deepcopy(layers), deepcopy(result)
+            returned_result = deepcopy(result)
+            self._layers = layers
+            self._map_title = map_title
+            self._results.append(result)
+            return returned_result
+
     def commit_views(self, raw, shown, *, message, tool_name, parent_ids=(), metrics=None):
         """Validate detached tool output, then publish once under the session lock."""
         with self.lock:
@@ -293,8 +402,9 @@ class SessionData:
                 layer_id = entry.get("layer_id") or new_id()
                 if layer_id in self._layers and self._layers[layer_id].dataset_id != key:
                     raise ValueError("Existing layer cannot change dataset reference")
+                visible = layers[layer_id].visible if layer_id in layers else entry.get("visible", True)
                 candidate = Layer(key, entry["name"], entry["type"], entry.get("data_field"),
-                                  deepcopy(entry.get("folium_kwargs", {})), layer_id)
+                                  deepcopy(entry.get("folium_kwargs", {})), layer_id, visible)
                 if layer_id not in layers:
                     created_layers.append(layer_id)
                 elif candidate != layers[layer_id]:

@@ -6,14 +6,13 @@ import streamlit as st
 from streamlit_folium import st_folium
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
-from agent.graph import create_agent_session
+from agent.graph import AGENT_RUNTIME_VERSION, create_agent_session
 from agent.llm import smart_analyze_geodata, serialize_metadata_sample
 from core.session import SessionData
 from gis.data_io import parse_uploaded_file, resolve_source_crs, prepare_map_layers
 from maps.renderer import (
     create_layered_map,
-    Titel_hinzufügen,
-    render_map_html
+    Titel_hinzufügen
 )
 
 
@@ -32,16 +31,15 @@ def _message_text(content):
     return str(content).strip() if content is not None else ""
 
 
-def _render_chat_history(placeholder):
-    with placeholder.container():
-        if not st.session_state.messages:
-            st.chat_message("assistant").write(
-                "Hallo! Ich bin dein autonomer GIS-Agent. Du kannst Daten hochladen oder mich bitten, "
-                "z.B. **'Zeige die Stadtgrenze von Dresden'**, **'Berechne einen 1000m Puffer'** oder "
-                "**'Führe eine räumliche Dichteanalyse durch'**."
-            )
-        for msg in st.session_state.messages:
-            st.chat_message(msg["role"]).write(msg["content"])
+def _render_chat_history():
+    if not st.session_state.messages:
+        st.chat_message("assistant").write(
+            "Hallo! Ich bin dein autonomer GIS-Agent. Du kannst Daten hochladen oder mich bitten, "
+            "z.B. **'Zeige die Stadtgrenze von Dresden'**, **'Berechne einen 1000m Puffer'** oder "
+            "**'Führe eine räumliche Dichteanalyse durch'**."
+        )
+    for msg in st.session_state.messages:
+        st.chat_message(msg["role"]).write(msg["content"])
 
 
 def _render_map(placeholder):
@@ -49,13 +47,14 @@ def _render_map(placeholder):
         try:
             m = create_layered_map(
                 prepare_map_layers(st.session_state.business_session.map_view),
-                show_basemap=st.session_state.show_basemap
+                show_basemap=st.session_state.business_session.show_basemap
             )
         except ValueError as exc:
             st.error(f"CRS/Karte: {exc}")
-            m = create_layered_map([], show_basemap=st.session_state.show_basemap)
-        if st.session_state.Karte_Titel:
-            Titel_hinzufügen(m, st.session_state.Karte_Titel)
+            m = create_layered_map([], show_basemap=st.session_state.business_session.show_basemap)
+        map_title = st.session_state.business_session.map_title
+        if map_title:
+            Titel_hinzufügen(m, map_title)
 
         st_folium(
             m,
@@ -75,18 +74,16 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "business_session" not in st.session_state:
     st.session_state.business_session = SessionData()
-if "session_agent" not in st.session_state:
+if ("session_agent" not in st.session_state
+        or st.session_state.get("agent_runtime_version") != AGENT_RUNTIME_VERSION):
     st.session_state.session_agent = create_agent_session(st.session_state.business_session)
+    st.session_state.agent_runtime_version = AGENT_RUNTIME_VERSION
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = set()
 if "map_key" not in st.session_state:
     st.session_state.map_key = 0            # Erzwingt die Neudarstellung der Folium-Karte
 if "upload_key" not in st.session_state:
     st.session_state.upload_key = 0         # Entfernt beim Zurücksetzen noch ausgewählte Uploads
-if "Karte_Titel" not in st.session_state:
-    st.session_state.Karte_Titel = ""
-if "show_basemap" not in st.session_state:
-    st.session_state.show_basemap = True
 if "agent_msg_history" not in st.session_state:
     st.session_state.agent_msg_history = []  # Verlauf aus nativen LangChain-Nachrichten
 
@@ -116,11 +113,21 @@ with st.sidebar:
 
     # 2. Auf der Karte dargestellte Layer anzeigen und entfernen
     with st.expander("📍 Aktive Kartenlayer", expanded=True):
-        if st.session_state.business_session.map_view:
-            for i, layer in enumerate(st.session_state.business_session.map_view):
-                col_name, col_delete = st.columns([4, 1])
+        managed_layers = st.session_state.business_session.layer_management_view
+        if managed_layers:
+            for i, layer in enumerate(managed_layers):
+                col_name, col_visibility, col_delete = st.columns([4, 1, 1])
                 with col_name:
-                    st.write(f"**{i + 1}.** {layer['name']} (`{layer['type']}`)")
+                    visibility = "sichtbar" if layer["visible"] else "ausgeblendet"
+                    st.write(f"**{i + 1}.** {layer['name']} (`{layer['type']}` · {visibility})")
+                with col_visibility:
+                    action = "ausblenden" if layer["visible"] else "einblenden"
+                    icon = "🙈" if layer["visible"] else "👁️"
+                    if st.button(icon, key=f"toggle_map_{layer['layer_id']}", help=f"Layer {action}"):
+                        st.session_state.business_session.set_layer_visibility(
+                            layer["layer_id"], not layer["visible"])
+                        st.session_state.map_key += 1
+                        st.rerun()
                 with col_delete:
                     if st.button("✕", key=f"del_map_{layer['layer_id']}"):
                         st.session_state.business_session.remove_layer(layer["layer_id"])
@@ -131,29 +138,21 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # 3. Karte als HTML exportieren
-    st.markdown("### 💾 Export")
-    if st.button("Karte als HTML exportieren"):
-        try:
-            m_export = create_layered_map(
-                prepare_map_layers(st.session_state.business_session.map_view),
-                show_basemap=st.session_state.show_basemap
-            )
-            if st.session_state.Karte_Titel:
-                Titel_hinzufügen(m_export, st.session_state.Karte_Titel)
-            st.download_button(
-                "📥 HTML-Datei herunterladen", render_map_html(m_export),
-                file_name="geogpt_map.html", mime="text/html"
-            )
-        except ValueError as exc:
-            st.error(f"CRS/Kartenexport: {exc}")
+    # 3. Basiskarte umschalten und Sitzung zurücksetzen
+    basemap_visible = st.session_state.business_session.show_basemap
+    basemap_widget_key = f"show_basemap_{st.session_state.business_session.basemap_revision}"
 
-    st.markdown("---")
+    def _save_basemap_visibility():
+        st.session_state.business_session.set_basemap_visibility(
+            st.session_state[basemap_widget_key]
+        )
+        st.session_state.map_key += 1
 
-    # 4. Basiskarte umschalten und Sitzung zurücksetzen
-    st.session_state.show_basemap = st.checkbox(
+    st.checkbox(
         "OpenStreetMap Basemap anzeigen",
-        value=st.session_state.show_basemap
+        value=basemap_visible,
+        key=basemap_widget_key,
+        on_change=_save_basemap_visibility
     )
 
     if st.button("🗑️ Chat & Sitzung zurücksetzen"):
@@ -163,7 +162,6 @@ with st.sidebar:
         st.session_state.processed_files = set()
         st.session_state.map_key += 1
         st.session_state.upload_key += 1
-        st.session_state.Karte_Titel = ""
         st.rerun()
 
 # ==========================================
@@ -218,9 +216,7 @@ with col1:
     st.markdown("---")
 
     # Container für den Chatverlauf
-    chat_container = st.container(height=420)
-    with chat_container:
-        chat_history_placeholder = st.empty()
+    chat_container = st.container(height=560, key="chat_history", autoscroll=True)
 
 # ======= Rechte Spalte: Interaktive Folium-Karte =======
 with col2:
@@ -233,6 +229,7 @@ with col2:
 user_query = st.chat_input("Was möchtest du analysieren oder auf der Karte darstellen?")
 
 if user_query:
+    st.session_state.business_session.clear_export_artifact()
     # 1. Benutzereingabe speichern und anzeigen
     st.session_state.messages.append({"role": "user", "content": user_query})
     user_msg_obj = HumanMessage(content=user_query)
@@ -300,5 +297,15 @@ if user_query:
 
 # Render both stateful areas after handling this run's user input so the first
 # response and map update do not depend on a follow-up widget or map event.
-_render_chat_history(chat_history_placeholder)
+with chat_container:
+    _render_chat_history()
+    export_artifact = st.session_state.business_session.export_artifact
+    if export_artifact:
+        st.download_button(
+            f"📥 {export_artifact['file_name']} herunterladen",
+            data=export_artifact["data"],
+            file_name=export_artifact["file_name"],
+            mime=export_artifact["mime_type"],
+            key=f"export_download_{st.session_state.business_session.export_revision}"
+        )
 _render_map(map_placeholder)

@@ -17,7 +17,8 @@ SIGNATURES = {
     "calculate_buffer_analysis": {"layer_name": ..., "distance_meters": 500.0},
     "calculate_area_and_density": {"polygon_layer_name": ..., "point_layer_name": None},
     "run_machine_learning_spatial_prediction": {"layer_name": ..., "target_field": None},
-    "update_map_style": {"layer_name": ..., "color": None, "weight": None, "fill_opacity": None},
+    "update_map_style": {"layer_name": ..., "color": None, "weight": None,
+        "fill_opacity": None, "fill_color": None},
     "calculate_feature_distances": {"layer_name": ..., "max_pairs": 10},
 }
 

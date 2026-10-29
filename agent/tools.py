@@ -1,6 +1,9 @@
 """Session-bound tool adapters; no current-user module global or context variable."""
 import json
+import io
+import re
 import urllib.parse
+import zipfile
 from functools import wraps
 from inspect import signature
 from typing import List, Optional
@@ -13,10 +16,13 @@ from sklearn.ensemble import RandomForestRegressor
 from langchain_core.tools import tool, StructuredTool
 
 from core.session import AmbiguousReference, SessionData
-from gis.data_io import extract_features_to_gdf
+from .attributes import is_non_measure_attribute
+from gis.data_io import extract_features_to_gdf, transform_geodata
 from gis import data_io as gis_data_io
 from gis.geometry import buffer_geometries, pairwise_distances
 from gis import statistics as gis_statistics
+from maps.renderer import create_layered_map, render_map_html, Titel_hinzufügen
+from maps.png_export import render_map_pdf, render_map_png
 
 def make_unique_layer_name(base_name: str, existing_layers: List[dict]) -> str:
     existing_names = [l["name"] for l in existing_layers]
@@ -35,7 +41,7 @@ def clean_gdf_for_geojson(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
 
 def create_tools(session: SessionData):
-    """Bind seven compatible schemas to one session, publishing only after success.
+    """Bind session-aware schemas to one session, publishing only after success.
 
     The working view exists only during a locked tool call and belongs to this
     factory's session. It is never shared with another session or module global.
@@ -43,6 +49,8 @@ def create_tools(session: SessionData):
     working = None
     used_dataset_ids = set()
     tool_metrics = {}
+    pending_map_action = {}
+    pending_export = {}
 
     def get_agent_layers():
         if working is None:
@@ -57,6 +65,28 @@ def create_tools(session: SessionData):
 
     def input_frame(target):
         return extract_features_to_gdf(target["data"], source_crs=target["crs"])
+
+    def meaningful_numeric_fields(frame):
+        fields = []
+        for field in frame.columns:
+            if field == frame.geometry.name:
+                continue
+            if is_non_measure_attribute(field):
+                continue
+            normalized = "".join(character for character in str(field).casefold() if character.isalnum())
+            if any(token in normalized for token in ("url", "uri", "timestamp")):
+                continue
+            source = frame[field]
+            if pd.api.types.is_bool_dtype(source.dtype):
+                continue
+            try:
+                values = pd.to_numeric(source, errors="coerce").to_numpy(dtype=float, na_value=np.nan)
+            except (TypeError, ValueError):
+                continue
+            values = values[np.isfinite(values)]
+            if len(values) >= 2 and np.unique(values).size > 1:
+                fields.append(field)
+        return fields
 
     @tool
     def fetch_city_boundary_osm(city_name: str) -> str:
@@ -106,10 +136,11 @@ def create_tools(session: SessionData):
                                color: str = "blue", weight: int = 2, fill_opacity: float = 0.4) -> str:
         """
         Bringt einen bereits hochgeladenen Rohdaten-Layer auf die Karte oder ändert dessen Darstellungsart.
-        map_type unterstützt: 'points', 'geojson', 'heatmap', 'choropleth'.
-        data_field: Vorhandenes numerisches Attribut für Choropleth/Heatmap. Für Choropleth niemals ein Feld aus
-        dem Layernamen ableiten. Ohne Angabe wird nur bei genau einem numerischen Attribut automatisch gewählt;
-        bei mehreren muss der Nutzer wählen oder die Auswahl ausdrücklich dem Agenten überlassen.
+        map_type unterstützt: 'points', 'line', 'geojson', 'heatmap', 'choropleth'.
+        data_field: Numerisches Attribut für Choropleth, Heatmap, proportionale Punktsymbole oder proportionale Linienstärke.
+        Für Choropleth niemals ein Feld aus dem Layernamen ableiten. Für 'points' und 'line' ohne geeignetes
+        numerisches Attribut normale Symbole verwenden; bei genau einem geeigneten Feld automatisch wählen.
+        Gibt es mehrere geeignete Felder, wähle das inhaltlich passendste und nenne weitere Optionen.
         """
         raw_layers, show_layers = get_agent_layers()
         all_available = show_layers + raw_layers
@@ -119,6 +150,29 @@ def create_tools(session: SessionData):
             return f"Layer '{layer_name}' nicht gefunden. Verfügbar sind: {available_names}"
 
         frame = input_frame(target)  # Unknown/conflicting CRS must not become a successful layer.
+
+        proportional_field = None
+        proportional_alternatives = []
+        if map_type in {"points", "line"}:
+            available_point_fields = meaningful_numeric_fields(frame)
+            if data_field:
+                matches = [field for field in available_point_fields
+                           if field.casefold() == data_field.casefold()]
+                if not matches:
+                    choices = ", ".join(available_point_fields) if available_point_fields else "Keine"
+                    return (f"Attribut '{data_field}' ist kein geeignetes numerisches Feld für diese Darstellung. "
+                            f"Verfügbare Felder: {choices}.")
+                proportional_field = matches[0]
+                proportional_alternatives = [field for field in available_point_fields
+                                             if field != proportional_field]
+            elif len(available_point_fields) == 1:
+                proportional_field = available_point_fields[0]
+            elif len(available_point_fields) > 1:
+                choices = ", ".join(available_point_fields)
+                display_kind = "Punktekarte" if map_type == "points" else "Linienkarte"
+                return (f"Für die proportionale {display_kind} muss ein numerisches Feld ausgewählt werden. "
+                        f"Wähle das inhaltlich passendste Feld und rufe das Werkzeug erneut damit auf. "
+                        f"Verfügbare Felder: {choices}.")
 
         if map_type == "choropleth":
             property_fields = [name for name in frame.columns if name != frame.geometry.name]
@@ -175,6 +229,8 @@ def create_tools(session: SessionData):
             "fillColor": color,
             "fillOpacity": fill_opacity
         }
+        if map_type == "points":
+            folium_kwargs["fillOpacity"] = 1.0
         if map_type == "heatmap":
             folium_kwargs = {"radius": 25, "blur": 15, "min_opacity": 0.3}
 
@@ -184,7 +240,7 @@ def create_tools(session: SessionData):
             "type": map_type,
             "dataset_id": target["dataset_id"],
             "data": target["data"],
-            "data_field": data_field,
+            "data_field": proportional_field if map_type in {"points", "line"} else data_field,
             "folium_kwargs": folium_kwargs,
             "style": folium_kwargs
         })
@@ -196,6 +252,16 @@ def create_tools(session: SessionData):
                         f"{missing_count} von {len(frame)} Objekten haben keinen gültigen Wert und werden als fehlend markiert.")
             return (f"Erfolg: Layer '{target['name']}' wurde als Choropleth unter dem Namen "
                     f"'{new_map_layer_name}' mit Attribut '{data_field}' erstellt.")
+        if map_type in {"points", "line"} and proportional_field:
+            measure = "Symbolgröße" if map_type == "points" else "Linienstärke"
+            display_kind = "proportionale Punktekarte" if map_type == "points" else "proportionale Linienkarte"
+            tool_metrics[f"{map_type}_size_field"] = proportional_field
+            if proportional_alternatives:
+                return (f"Erfolg: Layer '{target['name']}' wurde als {display_kind} erstellt. "
+                        f"Die {measure} basiert auf '{proportional_field}'. Weitere numerische Felder: "
+                        f"{', '.join(proportional_alternatives)}.")
+            return (f"Erfolg: Layer '{target['name']}' wurde als {display_kind} erstellt. "
+                    f"Die {measure} basiert auf '{proportional_field}'.")
         return f"Erfolg: Layer '{target['name']}' wurde als '{map_type}' unter dem Namen '{new_map_layer_name}' zur Karte hinzugefügt."
 
     @tool
@@ -318,9 +384,20 @@ def create_tools(session: SessionData):
 
     @tool
     def update_map_style(layer_name: str, color: Optional[str] = None, weight: Optional[int] = None,
-                         fill_opacity: Optional[float] = None) -> str:
+                         fill_opacity: Optional[float] = None,
+                         fill_color: Optional[str] = None) -> str:
         """
-        Ändert Farb- und Stilparameter (Farbe, Randstärke, Transparenz) eines bestehenden Kartenlayers.
+        Ändert den Stil eines sichtbaren Kartenlayers. 'color' steuert bei Choropleth nur die Umrandung;
+        'fill_color' steuert die Füllung. Für Choropleth ist fill_color eine der Paletten
+        'YlOrRd', 'Blues', 'Greens', 'Purples', 'Reds', 'Oranges', 'YlGn', 'YlGnBu',
+        'GnBu', 'PuBu', 'BuPu' oder 'RdYlBu'. Bei anderen Flächenlayern ist es eine CSS-Farbe.
+
+        Args:
+            layer_name: Name oder ID des sichtbaren Kartenlayers.
+            color: Umrandungsfarbe; bei Choropleth niemals als Füllpalette verwenden.
+            weight: Stärke der Umrandung.
+            fill_opacity: Transparenz der Flächenfüllung.
+            fill_color: Unabhängige Füllfarbe oder Choropleth-Palette.
         """
         _, show_layers = get_agent_layers()
         target = resolve(show_layers, layer_name, require_layer=True)
@@ -328,16 +405,40 @@ def create_tools(session: SessionData):
             return f"Sichtbarer Layer '{layer_name}' nicht gefunden."
 
         kwargs = target.get("folium_kwargs", {})
-        if color:
+        if color is not None:
             kwargs["color"] = color
-            kwargs["fillColor"] = color
-        if weight:
+            if target.get("type") != "choropleth":
+                kwargs["fillColor"] = color
+        if weight is not None:
             kwargs["weight"] = int(weight)
         if fill_opacity is not None:
             kwargs["fillOpacity"] = float(fill_opacity)
+        if fill_color is not None:
+            if target.get("type") == "choropleth":
+                palettes = {name.casefold(): name for name in (
+                    "YlOrRd", "Blues", "Greens", "Purples", "Reds", "Oranges",
+                    "YlGn", "YlGnBu", "GnBu", "PuBu", "BuPu", "RdYlBu")}
+                normalized = fill_color.casefold()
+                if normalized not in palettes:
+                    return ("Ungültige Choropleth-Füllpalette. Verfügbar sind: "
+                            "YlOrRd, Blues, Greens, Purples, Reds, Oranges, YlGn, YlGnBu, "
+                            "GnBu, PuBu, BuPu und RdYlBu.")
+                kwargs["fillColor"] = palettes[normalized]
+            else:
+                kwargs["fillColor"] = fill_color
 
         target["folium_kwargs"] = kwargs
-        return f"Erfolg: Stil für Layer '{layer_name}' aktualisiert auf {kwargs}."
+        changed = []
+        if color is not None:
+            changed.append(f"Umrandungsfarbe: {color}" if target.get("type") == "choropleth"
+                           else f"Farbe: {color}")
+        if fill_color is not None:
+            changed.append(f"Füllung: {kwargs['fillColor']}")
+        if weight is not None:
+            changed.append(f"Randstärke: {weight}")
+        if fill_opacity is not None:
+            changed.append(f"Fülltransparenz: {fill_opacity}")
+        return f"Erfolg: Stil für Layer '{layer_name}' aktualisiert. " + ", ".join(changed) + "."
 
     @tool
     def calculate_feature_distances(layer_name: str, max_pairs: int = 10) -> str:
@@ -402,6 +503,124 @@ def create_tools(session: SessionData):
         except Exception as e:
             return f"Fehler bei der Distanzberechnung: {str(e)}"
 
+    @tool
+    def export_current_map(format: str) -> str:
+        """Bereitet einen Download der aktuell sichtbaren Karte vor.
+
+        Args:
+            format: 'html' für die interaktive Karte, 'geojson' für sichtbare Vektordaten, 'png' für einen Kartenscreenshot oder 'pdf' für eine druckbare Kartenansicht.
+        """
+        normalized_format = format.strip().casefold().lstrip(".")
+        visible_layers = session.map_view
+        if normalized_format == "html":
+            map_layers = gis_data_io.prepare_map_layers(visible_layers)
+            map_object = create_layered_map(map_layers, show_basemap=session.show_basemap)
+            if session.map_title:
+                Titel_hinzufügen(map_object, session.map_title)
+            artifact = {
+                "data": render_map_html(map_object),
+                "file_name": "geogpt_map.html",
+                "mime_type": "text/html",
+            }
+        elif normalized_format == "geojson":
+            if not visible_layers:
+                return "Fehler: Es gibt keine sichtbaren Vektorebenen zum Exportieren."
+            files = []
+            for index, layer in enumerate(visible_layers, start=1):
+                frame = extract_features_to_gdf(layer["data"], source_crs=layer.get("crs"))
+                frame = transform_geodata(frame, 4326)
+                collection = json.loads(frame.to_json())
+                geojson_bytes = json.dumps(collection, ensure_ascii=False, allow_nan=False).encode("utf-8")
+                safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", layer["name"]).strip("._-") or "layer"
+                files.append((f"{index:02d}_{safe_name}.geojson", geojson_bytes))
+
+            if len(files) == 1:
+                file_name, data = files[0]
+                artifact = {"data": data, "file_name": file_name, "mime_type": "application/geo+json"}
+            else:
+                buffer = io.BytesIO()
+                with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                    for file_name, data in files:
+                        archive.writestr(file_name, data)
+                artifact = {
+                    "data": buffer.getvalue(),
+                    "file_name": "geogpt_layers_geojson.zip",
+                    "mime_type": "application/zip",
+                }
+        elif normalized_format == "png":
+            map_layers = gis_data_io.prepare_map_layers(visible_layers)
+            map_object = create_layered_map(map_layers, show_basemap=session.show_basemap)
+            if session.map_title:
+                Titel_hinzufügen(map_object, session.map_title)
+            html_document = render_map_html(map_object).decode("utf-8")
+            artifact = {
+                "data": render_map_png(html_document, show_basemap=session.show_basemap),
+                "file_name": "geogpt_map.png",
+                "mime_type": "image/png",
+            }
+        elif normalized_format == "pdf":
+            map_layers = gis_data_io.prepare_map_layers(visible_layers)
+            map_object = create_layered_map(map_layers, show_basemap=session.show_basemap)
+            if session.map_title:
+                Titel_hinzufügen(map_object, session.map_title)
+            html_document = render_map_html(map_object).decode("utf-8")
+            map_png = render_map_png(html_document, show_basemap=session.show_basemap)
+            artifact = {
+                "data": render_map_pdf(map_png),
+                "file_name": "geogpt_map.pdf",
+                "mime_type": "application/pdf",
+            }
+        else:
+            return "Fehler: Unterstützte Exportformate sind html, geojson, png und pdf."
+
+        pending_export["artifact"] = artifact
+        return f"Erfolg: Der Export '{artifact['file_name']}' wurde vorbereitet und steht zum Herunterladen bereit."
+
+    @tool
+    def manage_map_layer(layer_name: str, action: str) -> str:
+        """Entfernt einen Kartenlayer oder blendet ihn ein bzw. aus.
+
+        Args:
+            layer_name: Exakter Name oder Layer-ID eines Kartenlayers, auch wenn er ausgeblendet ist.
+            action: 'remove', 'hide' oder 'show'. Entfernen löscht nur die Kartendarstellung; Upload-Daten bleiben erhalten.
+        """
+        actions = {"remove", "hide", "show"}
+        normalized_action = action.strip().casefold()
+        if normalized_action not in actions:
+            return "Fehler: Aktion muss remove, hide oder show sein."
+        target = session.resolve_in(session.layer_management_view, layer_name, require_layer=True)
+        if not target:
+            return f"Fehler: Kartenlayer '{layer_name}' wurde nicht gefunden."
+        layer_id = target["layer_id"]
+        if normalized_action == "remove":
+            pending_map_action["action"] = {"type": "remove", "layer_id": layer_id}
+            return f"Erfolg: Layer '{target['name']}' wurde von der Karte entfernt. Die hochgeladenen Quelldaten bleiben erhalten."
+        visible = normalized_action == "show"
+        pending_map_action["action"] = {"type": "visibility", "layer_id": layer_id, "visible": visible}
+        verb = "eingeblendet" if visible else "ausgeblendet"
+        return f"Erfolg: Layer '{target['name']}' wurde {verb}."
+
+    @tool
+    def set_map_title(title: str) -> str:
+        """Set the single global title shown above the current map and in visual exports.
+
+        Args:
+            title: A concise title supplied by the user or generated from the currently visible map layers.
+        """
+        normalized_title = title.strip()
+        if not normalized_title:
+            return "Fehler: Der Kartentitel darf nicht leer sein."
+        pending_map_action["action"] = {"type": "title", "title": normalized_title}
+        return f"Erfolg: Der Kartentitel wurde auf '{normalized_title}' gesetzt."
+
+    @tool
+    def clear_map_title() -> str:
+        """Remove the current global map title from the map and visual exports."""
+        pending_map_action["action"] = {"type": "clear_title"}
+        if not session.map_title:
+            return "Erfolg: Die Karte hat bereits keinen Titel."
+        return "Erfolg: Der Kartentitel wurde entfernt."
+
     TOOLS = [
         fetch_city_boundary_osm,
         visualize_layer_on_map,
@@ -409,7 +628,11 @@ def create_tools(session: SessionData):
         calculate_area_and_density,
         run_machine_learning_spatial_prediction,
         update_map_style,
-        calculate_feature_distances
+        calculate_feature_distances,
+        manage_map_layer,
+        export_current_map,
+        set_map_title,
+        clear_map_title
     ]
 
     def bind_atomic(legacy):
@@ -420,6 +643,8 @@ def create_tools(session: SessionData):
                 working = session.legacy_layers()
                 used_dataset_ids.clear()
                 tool_metrics.clear()
+                pending_map_action.clear()
+                pending_export.clear()
                 arguments = signature(legacy.func).bind(*args, **kwargs)
                 arguments.apply_defaults()
                 try:
@@ -434,8 +659,16 @@ def create_tools(session: SessionData):
                     for key in ("distance_meters", "max_pairs"):
                         if key in arguments.arguments:
                             metrics[key] = arguments.arguments[key]
-                    result = session.commit_views(*working, message=message, tool_name=legacy.name,
-                                                  parent_ids=tuple(sorted(used_dataset_ids)), metrics=metrics)
+                    map_action = pending_map_action.get("action")
+                    export_artifact = pending_export.get("artifact")
+                    if export_artifact:
+                        result = session.commit_export_artifact(export_artifact, message=message,
+                                                                tool_name=legacy.name)
+                    elif map_action:
+                        result = session.commit_map_action(map_action, message=message, tool_name=legacy.name)
+                    else:
+                        result = session.commit_views(*working, message=message, tool_name=legacy.name,
+                                                      parent_ids=tuple(sorted(used_dataset_ids)), metrics=metrics)
                     return result.message
                 except AmbiguousReference as exc:
                     return session.record_failure(str(exc), "ambiguous_reference").message
@@ -445,6 +678,8 @@ def create_tools(session: SessionData):
                     working = None
                     used_dataset_ids.clear()
                     tool_metrics.clear()
+                    pending_map_action.clear()
+                    pending_export.clear()
         return StructuredTool.from_function(execute, name=legacy.name, description=legacy.description,
                                             args_schema=legacy.args_schema)
 
