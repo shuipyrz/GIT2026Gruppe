@@ -96,9 +96,9 @@ class AgentState(TypedDict):
 def agent_reasoner(state: AgentState, *, llm_with_tools, get_layers) -> dict:
     """Reasoning-Phase: Das LLM entscheidet anhand des Kontexts, ob es antwortet oder ein Werkzeug aufruft."""
     raw_layers, show_layers = get_layers()
-    raw_summary = [f"'{l['name']}' ({l['type']}; Attribute: {_layer_attribute_summary(l)})" + (
+    raw_summary = [f"'{l['name']}' ({l['type']}; CRS: {l.get('crs') or 'unbekannt'}; Attribute: {_layer_attribute_summary(l)})" + (
         f" [Dataset-ID: {l['dataset_id']}]" if l.get("dataset_id") else "") for l in raw_layers]
-    show_summary = [f"'{l['name']}' ({l['type']}; Attribute: {_layer_attribute_summary(l)})" + (
+    show_summary = [f"'{l['name']}' ({l['type']}; CRS: {l.get('crs') or 'unbekannt'}; Attribute: {_layer_attribute_summary(l)})" + (
         (f" [data field: {l['data_field']}]" if l.get("data_field") else "") +
         (f" [Layer-ID: {l['layer_id']}, Dataset-ID: {l['dataset_id']}]" if l.get("layer_id") else ""))
         for l in show_layers]
@@ -107,6 +107,10 @@ def agent_reasoner(state: AgentState, *, llm_with_tools, get_layers) -> dict:
     managed_layers = session.layer_management_view if session is not None else show_layers
     hidden_summary = [layer["name"] for layer in managed_layers if not layer.get("visible", True)]
     map_title = session.map_title if session is not None else ""
+    relation_summary = [
+        f"{item['source_dataset']}.{item['source_field']} → {item['target_dataset']}.{item['target_field']}"
+        for item in (session.attribute_relations if session is not None else [])
+    ]
 
     system_prompt = f"""
     Du bist GeoGPT, ein autonomer und professioneller GIS-Agent.
@@ -120,6 +124,7 @@ def agent_reasoner(state: AgentState, *, llm_with_tools, get_layers) -> dict:
     Uploads, ausgeblendete/gelöschte Layer und frühere Chat-Aussagen dürfen dabei nicht als aktuell angezeigt gelten.
     - Ausgeblendete Layer (nur für Ein-/Ausblenden/Entfernen): [{', '.join(hidden_summary) if hidden_summary else 'Keine'}]
     - Aktueller Kartentitel: {map_title or 'Keiner'}
+    - Temporär gespeicherte Attributzuordnungen dieser Sitzung: [{'; '.join(relation_summary) if relation_summary else 'Keine'}]
 
     HANDLUNGSLEITFADEN:
     1. Du darfst und sollst Werkzeuge (Tools) verwenden, um Aktionen durchzuführen.
@@ -138,6 +143,15 @@ def agent_reasoner(state: AgentState, *, llm_with_tools, get_layers) -> dict:
     14. Bei einer ausdrücklichen Exportanfrage MUSS 'export_current_map' aufgerufen werden. Verwende format='html' für eine interaktive Karte, format='geojson' für sichtbare Vektordaten, format='png' für einen Screenshot und format='pdf' für eine druckbare Kartenansicht. HTML, PNG und PDF enthalten die derzeit sichtbaren Layer und den aktuellen Basiskartenstatus; GeoJSON enthält nur sichtbare Vektorlayer, keine Basiskarte. Bei mehreren GeoJSON-Layern entsteht ein ZIP-Archiv. Frage nach dem Format, wenn es nicht genannt wurde. Behaupte den Export erst nach erfolgreichem Werkzeugergebnis.
     15. Wenn der Nutzer ausdrücklich einen Kartentitel setzen, hinzufügen oder automatisch erzeugen lassen möchte, rufe 'set_map_title' auf. Bei einem vorgegebenen Titel übernimm den gewünschten Wortlaut exakt. Für einen automatischen Titel verwende ausschließlich Namen und tatsächlich angezeigte Attribute der aktuell sichtbaren Layer; beziehe ausgeblendete oder nur hochgeladene Daten nicht ein. Erfinde keine Inhalte. Formuliere den automatisch erzeugten Titel knapp und in der Sprache der Nutzeranfrage, wobei Layer-Eigennamen erhalten bleiben. Wenn keine Layer sichtbar sind, frage nach den gewünschten Titelinhalten. Eine reine Bitte um Titelvorschläge ohne Aufforderung zum Setzen beantwortest du, ohne den Kartentitel zu ändern.
     16. Wenn der Nutzer ausdrücklich den aktuellen Kartentitel entfernen, löschen oder zurücksetzen möchte, MUSS 'clear_map_title' aufgerufen werden. Behaupte die Entfernung erst nach erfolgreichem Werkzeugergebnis.
+    17. Wenn der Nutzer die Koordinatenreferenzsysteme (CRS) seiner hochgeladenen Datensätze prüfen oder vergleichen lassen möchte, rufe 'check_dataset_crs_consistency' auf und berichte das Werkzeugergebnis. Das Werkzeug prüft nur und verändert keine Daten.
+    18. Wenn der Nutzer hochgeladene Daten auf fehlende Koordinaten, auffällige Datensätze oder ungültige Geometrien prüfen lassen möchte, rufe 'check_uploaded_data_quality' auf und berichte die gezählten Befunde. Das Werkzeug prüft nur und verändert keine Daten.
+    19. Wenn der Nutzer zwei Datensätze über Attribute verknüpfen möchte, rufe 'associate_dataset_attributes' auf. Verwende die Datensätze in der angegebenen Richtung (Quelldaten → Zieldaten), nutze eindeutig erkennbare Felder oder bitte bei Mehrdeutigkeit um Präzisierung. Berichte die Feldzuordnung, Treffer, Nichttreffer und doppelte Schlüssel. Dies ist eine temporäre Zuordnung in der Sitzung; führe keine räumliche Verknüpfung und keinen Datenmerge aus.
+    20. Wenn der Nutzer Datensätze nach einem Attribut filtern und einen neuen Layer erzeugen möchte, rufe 'filter_dataset_by_attribute' auf. Verwende nur tatsächlich vorhandene Felder. Wähle 'equals' oder 'contains' für Kategorien, numerische Operatoren für Messwerte und 'within_last_years' mit der Anzahl der Jahre für relative Zeitangaben. Frage nach einer Präzisierung, wenn Feld oder Wert nicht eindeutig ist. Der Quell-Datensatz bleibt unverändert; berichte Bedingung und Anzahl der ausgewählten Datensätze.
+    21. Für Distanzabfragen rufe 'calculate_feature_distances' auf. Bei einem Layer und allen Objektpaaren verwende query_mode='all_pairs'; zwischen zwei Layern verwende query_mode='nearest' für den nächsten Nachbarn je Quellobjekt oder query_mode='within_distance' mit distance_threshold_meters für alle Paare im Umkreis. Ein Schwellenwert zusammen mit 'nearest' klassifiziert Quellobjekte danach, ob ihr nächster Nachbar innerhalb oder außerhalb des Grenzwerts liegt. Unterstützt werden Punkt-, Linien- und Flächengeometrien; berichte, welche Layer verglichen wurden und welche Ergebnisse die Abfrage lieferte.
+    22. Wenn der Nutzer räumliche Beziehungen zwischen zwei Layern prüfen und die Ergebnisse auf der Karte sehen möchte, rufe 'query_spatial_relationship' auf. Für Punkte und Verwaltungsflächen verwende relationship='point_in_polygon'; für räumliche Überschneidungen verwende 'intersects'. Berichte Treffer, Nichttreffer und Mehrfachtreffer. Bei point_in_polygon bleiben Nichttreffer im neuen Ergebnislayer, ihre related_-Attribute sind leer. Es wird keine räumliche Distanz berechnet.
+    23. Wenn der Nutzer Polygonlayer räumlich überlagern möchte, rufe 'run_spatial_overlay' mit der passenden Operation auf: intersection, difference, union oder symmetric_difference. 'difference' bedeutet immer Layer A minus Layer B. 'union' teilt Überlappungen und erhält Attribute beider Layer. Für mehrstufige Analysen darfst du Operationen nacheinander ausführen und erzeugte Ergebnislayer als nächsten Eingang verwenden; erkläre die Reihenfolge und fasse die Ergebnisse zusammen. Verwende das Werkzeug nur für Polygon-/MultiPolygon-Layer.
+    24. Wenn der Nutzer hohe Ereignisdichten oder Hotspots in Punktdaten identifizieren möchte, rufe 'identify_spatial_hotspots' auf. Verwende nur Punktlayer. Nenne Zellgröße und Hotspot-Perzentil; Ergebnis ist ein Raster-Choropleth mit Zählwerten und Hotspot-Zellen. Erkläre, dass dies eine Perzentil-basierte Dichteklassifikation und kein statistischer Signifikanztest ist. Eine reine Bitte um Heatmap-Visualisierung bleibt eine Kartenvisualisierung und verwendet stattdessen den bestehenden Heatmap-Weg.
+    25. Wenn der Nutzer einen Datensatz dauerhaft in ein anderes Koordinatenreferenzsystem umwandeln möchte, rufe 'transform_dataset_crs' auf. Verwende ein vom Nutzer genanntes oder eindeutig angegebenes Ziel-CRS; rate es nicht. Wenn das Ziel-CRS fehlt, frage danach. Ein unbekanntes Quell-CRS darf nicht erraten werden. Die Transformation erstellt eine neue Ebene und lässt die Quelle unverändert.
     """
 
     # Systemnachrichten entfernen und den aktuellen Systemkontext an den Anfang setzen.

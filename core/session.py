@@ -49,6 +49,7 @@ class SessionData:
         self._datasets = {}
         self._layers = {}
         self._uploads = []
+        self._attribute_relations = []
         self._results = []
         self._show_basemap = True
         self._basemap_revision = 0
@@ -72,6 +73,27 @@ class SessionData:
     def results(self):
         with self.lock:
             return deepcopy(self._results)
+
+    @property
+    def attribute_relations(self):
+        """Temporary attribute-field mappings created in this session."""
+        with self.lock:
+            return deepcopy(self._attribute_relations)
+
+    def commit_attribute_relation(self, relation, *, message, tool_name):
+        """Store or replace a session-local mapping after its match report succeeds."""
+        with self.lock:
+            stored = deepcopy(relation)
+            identity = (stored["source_dataset_id"], stored["target_dataset_id"],
+                        stored["source_field"], stored["target_field"])
+            relations = [item for item in self._attribute_relations if (
+                item["source_dataset_id"], item["target_dataset_id"],
+                item["source_field"], item["target_field"]) != identity]
+            relations.append(stored)
+            result = ToolResult(True, message, metrics=deepcopy(stored.get("metrics", {})))
+            self._attribute_relations = relations
+            self._results.append(result)
+            return deepcopy(result)
 
     @property
     def export_artifact(self):
@@ -242,6 +264,8 @@ class SessionData:
                 del self._layers[key]
             if dataset_id in self._uploads:
                 self._uploads.remove(dataset_id)
+            self._attribute_relations = [relation for relation in self._attribute_relations
+                                         if dataset_id not in (relation["source_dataset_id"], relation["target_dataset_id"])]
             del self._datasets[dataset_id]
 
     def reset(self):
@@ -249,6 +273,7 @@ class SessionData:
             self._datasets.clear()
             self._layers.clear()
             self._uploads.clear()
+            self._attribute_relations.clear()
             self._results.clear()
             self._export_artifact = None
             self._map_title = ""
@@ -275,6 +300,7 @@ class SessionData:
         with self.lock:
             self._datasets, self._layers, self._uploads = replacement._datasets, replacement._layers, replacement._uploads
             self._results = []
+            self._attribute_relations = []
             self._map_title = ""
 
     @classmethod
