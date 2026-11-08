@@ -829,6 +829,53 @@ def create_tools(session: SessionData):
             return f"Fehler bei Flächen-/Dichteberechnung: {str(e)}"
 
     @tool
+    def calculate_derived_indicator(layer_name: str, numerator_field: str,
+                                    denominator_field: str, output_field: str,
+                                    scale_factor: float = 1.0, decimals: int = 2) -> str:
+        """Berechnet je Datensatz eine abgeleitete Kennzahl: Zählerfeld geteilt durch Nennerfeld mal Skalierungsfaktor. Erzeugt einen neuen Layer und verändert den Quelldatensatz nicht. Nenner 0 und fehlende/nichtnumerische Werte werden als fehlend markiert."""
+        raw_layers, show_layers = get_agent_layers()
+        try:
+            target = resolve(show_layers + raw_layers, layer_name)
+        except AmbiguousReference as exc:
+            return f"Fehler: {exc}"
+        if target is None:
+            return f"Fehler: Datensatz '{layer_name}' wurde nicht gefunden."
+        try:
+            source_frame = input_frame(target)
+            result = gis_statistics.calculate_derived_indicator(
+                source_frame, numerator_field=numerator_field,
+                denominator_field=denominator_field, output_field=output_field,
+                scale_factor=scale_factor, decimals=decimals)
+            missing_count = int(result[output_field].isna().sum())
+            result = clean_gdf_for_geojson(result)
+            geometry_types = set(result.geometry.geom_type.dropna())
+            map_type = ("choropleth" if geometry_types <= {"Polygon", "MultiPolygon"} else
+                        "points" if geometry_types <= {"Point", "MultiPoint"} else
+                        "line" if geometry_types <= {"LineString", "MultiLineString"} else "geojson")
+            new_name = make_unique_layer_name(f"{output_field}_{target['name']}", show_layers)
+            show_layers.append({
+                "name": new_name, "type": map_type, "data": result,
+                "data_field": output_field if map_type == "choropleth" else None,
+                "_format": "collection", "crs": target.get("crs"),
+                "folium_kwargs": {"fillColor": "YlOrRd", "color": "black",
+                                  "weight": 1, "fillOpacity": 0.7}
+            })
+            tool_metrics.update(feature_count=len(result), output_field=output_field,
+                                missing_indicator_count=missing_count,
+                                numerator_field=numerator_field,
+                                denominator_field=denominator_field,
+                                scale_factor=scale_factor)
+            message = (f"Erfolg: '{output_field}' = '{numerator_field}' / '{denominator_field}' × "
+                       f"{scale_factor:g} wurde für '{target['name']}' berechnet. Der neue Layer "
+                       f"'{new_name}' enthält {len(result)} Datensätze.")
+            if missing_count:
+                message += (f" Für {missing_count} Datensätze ist der Wert fehlend, weil Zähler oder "
+                            "Nenner fehlen/ungültig sind oder der Nenner 0 ist.")
+            return message
+        except Exception as exc:
+            return f"Fehler bei der Kennzahlenberechnung: {exc}"
+
+    @tool
     def run_machine_learning_spatial_prediction(layer_name: str, target_field: Optional[str] = None) -> str:
         """
         Trainiert einen Random-Forest-Regressor auf den Raumkoordinaten (lat/lon) des Ziel-Layers,
@@ -1069,6 +1116,168 @@ def create_tools(session: SessionData):
             return f"Fehler bei der Distanzberechnung: {str(e)}"
 
     @tool
+    def aggregate_features_by_area(area_layer_name: str, source_layer_name: str,
+                                   operation: Literal["count", "sum"],
+                                   value_field: Optional[str] = None) -> str:
+        """Zählt Quellobjekte je Polygon oder summiert ein numerisches Quellfeld je Polygon und gibt eine Statistiktabelle zurück. Punkte am Polygonrand gelten nicht als innerhalb; bei anderen Geometrien zählt jede Überschneidung. Bei überlappenden Flächen kann ein Quellobjekt mehrfach eingehen."""
+        raw_layers, show_layers = get_agent_layers()
+        pool = show_layers + raw_layers
+        try:
+            areas = resolve(pool, area_layer_name)
+            source = resolve(pool, source_layer_name)
+        except AmbiguousReference as exc:
+            return f"Fehler: {exc}"
+        if areas is None:
+            return f"Fehler: Flächen-Layer '{area_layer_name}' wurde nicht gefunden."
+        if source is None:
+            return f"Fehler: Quell-Layer '{source_layer_name}' wurde nicht gefunden."
+        if areas["dataset_id"] == source["dataset_id"]:
+            return "Fehler: Bitte unterschiedliche Flächen- und Quelldatensätze angeben."
+        try:
+            result = gis_statistics.aggregate_by_area(
+                input_frame(areas), input_frame(source), operation=operation, value_field=value_field)
+            aggregate_field = result.columns[-1]
+            preferred = [c for c in ("name", "NAME", "Name", "stadtteil", "Stadtteil",
+                                      "bezirk", "Bezirk", "district", "id", "ID") if c in result.columns]
+            columns = list(dict.fromkeys(preferred + [c for c in result.columns
+                                                       if c not in preferred and c != result.geometry.name]))
+            columns = columns[:8]
+            if aggregate_field not in columns:
+                columns[-1] = aggregate_field
+            table = result[columns].copy()
+            table.insert(0, "Gebiet", [str(v) for v in range(1, len(table) + 1)])
+            # Prefer a meaningful area label where available.
+            if preferred:
+                table["Gebiet"] = result[preferred[0]].fillna("").astype(str).replace("", "Unbenannt")
+                table = table.drop(columns=[preferred[0]])
+            table = table.rename(columns={c: str(c) for c in table.columns})
+            tool_metrics.update(area_count=len(result), operation=operation,
+                                source_feature_count=len(input_frame(source)))
+            heading = "Anzahl je Gebiet" if operation == "count" else f"Summe von '{value_field}' je Gebiet"
+            result = clean_gdf_for_geojson(result)
+            result_layer_name = make_unique_layer_name(
+                f"{aggregate_field}_{source['name']}_nach_{areas['name']}", show_layers)
+            show_layers.append({
+                "name": result_layer_name, "type": "choropleth", "data": result,
+                "data_field": aggregate_field, "_format": "collection",
+                "crs": areas.get("crs"),
+                "folium_kwargs": {"fillColor": "Blues", "color": "black",
+                                  "weight": 1, "fillOpacity": 0.7}
+            })
+            headers = [str(column) for column in table.columns]
+            rows = [[str(value).replace("|", "\\|").replace("\n", " ") for value in row]
+                    for row in table.itertuples(index=False, name=None)]
+            markdown_table = ("| " + " | ".join(headers) + " |\n"
+                              + "| " + " | ".join("---" for _ in headers) + " |\n"
+                              + "\n".join("| " + " | ".join(row) + " |" for row in rows))
+            return (f"Erfolg: **{heading}** für '{source['name']}' nach den Gebieten aus "
+                    f"'{areas['name']}' berechnet. Alle {len(result)} Gebiete sind enthalten; "
+                    f"Gebiete ohne Treffer haben den Wert 0. Das Ergebnisfeld '{aggregate_field}' "
+                    f"steht im neuen Layer '{result_layer_name}'.\n\n" + markdown_table)
+        except Exception as exc:
+            return f"Fehler bei der Flächenaggregation: {exc}"
+
+    @tool
+    def calculate_feature_area_by_area(area_layer_name: str, source_layer_name: str,
+                                       output_field: str = "Schnittflaeche_km2") -> str:
+        """Schneidet Polygonflächen exakt an Gebietsgrenzen und summiert die Schnittfläche je Gebiet in km². Gibt eine Ergebnistabelle und einen wiederverwendbaren Choropleth-Layer zurück."""
+        raw_layers, show_layers = get_agent_layers()
+        pool = show_layers + raw_layers
+        try:
+            areas = resolve(pool, area_layer_name)
+            source = resolve(pool, source_layer_name)
+        except AmbiguousReference as exc:
+            return f"Fehler: {exc}"
+        if areas is None:
+            return f"Fehler: Flächen-Layer '{area_layer_name}' wurde nicht gefunden."
+        if source is None:
+            return f"Fehler: Quell-Layer '{source_layer_name}' wurde nicht gefunden."
+        if areas["dataset_id"] == source["dataset_id"]:
+            return "Fehler: Bitte unterschiedliche Gebiets- und Quell-Layer angeben."
+        try:
+            result = gis_statistics.calculate_intersection_area_by_area(
+                input_frame(areas), input_frame(source), output_field=output_field)
+            result_field = result.columns[-1]
+            label_fields = [c for c in ("name", "NAME", "Name", "stadtteil", "Stadtteil",
+                                        "bezirk", "Bezirk", "district", "id", "ID")
+                            if c in result.columns]
+            labels = (result[label_fields[0]].fillna("").astype(str).replace("", "Unbenannt").tolist()
+                      if label_fields else [f"Gebiet {i + 1}" for i in range(len(result))])
+            values = result[result_field].tolist()
+            escaped_labels = [str(label).replace("|", "\\|") for label in labels]
+            markdown_table = ("| Gebiet | Fläche (km²) |\n| --- | ---: |\n" +
+                              "\n".join(f"| {label} | {value:.6f} |"
+                                        for label, value in zip(escaped_labels, values)))
+            result = clean_gdf_for_geojson(result)
+            result_layer_name = make_unique_layer_name(
+                f"{result_field}_{source['name']}_nach_{areas['name']}", show_layers)
+            show_layers.append({
+                "name": result_layer_name, "type": "choropleth", "data": result,
+                "data_field": result_field, "_format": "collection",
+                "crs": areas.get("crs"),
+                "folium_kwargs": {"fillColor": "Greens", "color": "black",
+                                  "weight": 1, "fillOpacity": 0.7}
+            })
+            tool_metrics.update(area_count=len(result), source_feature_count=len(input_frame(source)),
+                                output_field=result_field)
+            return (f"Erfolg: Die Flächen von '{source['name']}' wurden an den Gebietsgrenzen aus "
+                    f"'{areas['name']}' geschnitten und als km² je Gebiet summiert. Ergebnislayer "
+                    f"'{result_layer_name}' mit Feld '{result_field}'.\n\n" + markdown_table)
+        except Exception as exc:
+            return f"Fehler bei der flächenbezogenen Aggregation: {exc}"
+
+    @tool
+    def rank_dataset_by_field(dataset_name: str, field_name: str, limit: int = 5,
+                              order: Literal["descending", "ascending"] = "descending") -> str:
+        """Sortiert einen Datensatz nach einem numerischen Attribut und gibt die Top-N-Werte als Berichtstabelle aus. Erstellt keinen neuen Layer. Gleichstände behalten die ursprüngliche Datensatzreihenfolge; fehlende/nichtnumerische Werte werden ausgelassen."""
+        raw_layers, show_layers = get_agent_layers()
+        try:
+            target = resolve(show_layers + raw_layers, dataset_name)
+        except AmbiguousReference as exc:
+            return f"Fehler: {exc}"
+        if target is None:
+            return f"Fehler: Datensatz '{dataset_name}' wurde nicht gefunden."
+        try:
+            n = int(limit)
+            if n < 1 or n > 100:
+                return "Fehler: Die Anzahl N muss zwischen 1 und 100 liegen."
+            if order not in {"ascending", "descending"}:
+                return "Fehler: order muss 'ascending' oder 'descending' sein."
+            frame = input_frame(target).reset_index(drop=True)
+            if field_name not in frame.columns or field_name == frame.geometry.name:
+                return f"Fehler: Attribut '{field_name}' ist in '{target['name']}' nicht vorhanden."
+            numeric = pd.to_numeric(frame[field_name], errors="coerce")
+            valid = numeric.notna()
+            if not valid.any():
+                return f"Fehler: Attribut '{field_name}' enthält keine gültigen numerischen Werte."
+            ascending = order == "ascending"
+            ranked_indices = numeric.loc[valid].sort_values(ascending=ascending, kind="stable").index[:n]
+            label_candidates = ["name", "NAME", "Name", "stadtteil", "Stadtteil", "bezirk",
+                                "Bezirk", "district", "District", "id", "ID"]
+            label_field = next((field for field in label_candidates
+                                if field in frame.columns and field != field_name), None)
+            rows = []
+            for rank, index in enumerate(ranked_indices, start=1):
+                label = str(frame.loc[index, label_field]) if label_field else f"Objekt {index + 1}"
+                label = label.replace("|", "\\|").replace("\n", " ")
+                value = float(numeric.loc[index])
+                rows.append((rank, label, value))
+            direction = "absteigend" if not ascending else "aufsteigend"
+            tool_metrics.update(result_count=len(rows), missing_value_count=int((~valid).sum()),
+                                ranked_field=field_name, ranking_order=order, limit=n)
+            table = ("| Rang | Gebiet/Objekt | " + field_name.replace("|", "\\|") + " |\n"
+                     "| ---: | --- | ---: |\n" +
+                     "\n".join(f"| {rank} | {label} | {value:.6g} |" for rank, label, value in rows))
+            message = (f"Erfolg: Top {len(rows)} in '{target['name']}' nach '{field_name}' "
+                       f"({direction}) sortiert.\n\n" + table)
+            missing = int((~valid).sum())
+            if missing:
+                message += f"\n\n{missing} Datensätze ohne gültigen Zahlenwert wurden ausgelassen."
+            return message
+        except Exception as exc:
+            return f"Fehler beim Sortieren nach '{field_name}': {exc}"
+
+    @tool
     def query_spatial_relationship(source_layer_name: str, target_layer_name: str,
                                    relationship: Literal["point_in_polygon", "intersects"] = "intersects") -> str:
         """Prüft räumliche Beziehungen zwischen zwei Layern und erzeugt einen Ergebnislayer. point_in_polygon ordnet Quellpunkte Zielpolygonen zu und behält nicht zugeordnete Punkte mit leeren Zielattributen; intersects liefert Quellobjekte mit Schnitt mit mindestens einem Zielobjekt."""
@@ -1191,6 +1400,50 @@ def create_tools(session: SessionData):
                     + "Die Einstufung ist eine Dichte-Regel, kein statistischer Signifikanztest.")
         except Exception as exc:
             return f"Fehler bei der Dichte-/Hotspotanalyse: {exc}"
+
+    @tool
+    def export_statistical_table(dataset_name: str, fields: Optional[List[str]] = None,
+                                 file_name: Optional[str] = None) -> str:
+        """Export attribute columns of a dataset or statistical result layer as a downloadable UTF-8 CSV attachment. Geometry is omitted; if fields is not provided, every non-geometry column is exported."""
+        raw_layers, show_layers = get_agent_layers()
+        try:
+            target = resolve(show_layers + raw_layers, dataset_name)
+        except AmbiguousReference as exc:
+            return f"Fehler: {exc}"
+        if target is None:
+            return f"Fehler: Datensatz oder Ergebnisebene '{dataset_name}' wurde nicht gefunden."
+        try:
+            frame = input_frame(target)
+            available_fields = [column for column in frame.columns if column != frame.geometry.name]
+            if fields is None:
+                selected_fields = available_fields
+            else:
+                if not fields:
+                    return "Fehler: Bitte mindestens ein Attributfeld zum Exportieren auswählen."
+                missing_fields = [field for field in fields if field not in available_fields]
+                if missing_fields:
+                    return ("Fehler: Diese Felder sind nicht exportierbar oder nicht vorhanden: "
+                            + ", ".join(missing_fields) + ".")
+                selected_fields = list(dict.fromkeys(fields))
+            if not selected_fields:
+                return f"Fehler: '{target['name']}' enthält keine exportierbaren Attributfelder."
+            table = frame[selected_fields].copy()
+            csv_bytes = table.to_csv(index=False, lineterminator="\n").encode("utf-8-sig")
+            base_name = file_name or f"{target['name']}_statistik.csv"
+            base_name = re.sub(r"[\\/:*?\"<>|]+", "_", base_name.strip()).strip(" .")
+            if not base_name:
+                base_name = "statistik.csv"
+            if not base_name.casefold().endswith(".csv"):
+                base_name += ".csv"
+            artifact = {"data": csv_bytes, "file_name": base_name, "mime_type": "text/csv; charset=utf-8"}
+            pending_export["artifact"] = artifact
+            tool_metrics.update(row_count=len(table), column_count=len(selected_fields),
+                                exported_fields=[str(field) for field in selected_fields])
+            return (f"Erfolg: '{target['name']}' wurde als CSV mit {len(table)} Datensätzen und "
+                    f"{len(selected_fields)} Spalten exportiert. Geometrien sind nicht enthalten; "
+                    f"die Datei '{base_name}' steht als Download-Anhang bereit.")
+        except Exception as exc:
+            return f"Fehler beim CSV-Export: {exc}"
 
     @tool
     def export_current_map(format: str) -> str:
@@ -1316,6 +1569,9 @@ def create_tools(session: SessionData):
         check_uploaded_data_quality,
         associate_dataset_attributes,
         filter_dataset_by_attribute,
+        aggregate_features_by_area,
+        calculate_feature_area_by_area,
+        rank_dataset_by_field,
         query_spatial_relationship,
         run_spatial_overlay,
         identify_spatial_hotspots,
@@ -1323,10 +1579,12 @@ def create_tools(session: SessionData):
         visualize_layer_on_map,
         calculate_buffer_analysis,
         calculate_area_and_density,
+        calculate_derived_indicator,
         run_machine_learning_spatial_prediction,
         update_map_style,
         calculate_feature_distances,
         manage_map_layer,
+        export_statistical_table,
         export_current_map,
         set_map_title,
         clear_map_title

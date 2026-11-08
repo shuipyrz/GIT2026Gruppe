@@ -64,17 +64,17 @@ After uploading one or more GeoJSON, JSON, or CSV files, enter a natural-languag
 |---|---|---|---|
 | Upload and combine data | Upload multiple files, then ask: “Please analyze the school, bus stop, and administrative boundary data I uploaded together.” | Multiple GeoJSON, JSON, or CSV files can be used in the same session. | Implemented |
 | Inspect data | “Tell me which datasets are currently uploaded and what geometry types and attributes they contain.” | Field detection depends on the data. | Implemented |
-| Identify and transform coordinate reference systems | “Check the coordinate reference systems of these datasets and transform them if needed.” | Availability depends on the input data and analysis. | Implemented |
-| Check data quality | “Check the data for missing coordinates, anomalous records, and invalid geometries.” | Data quality validation is not yet complete. | Partially implemented |
-| Match semantically equivalent fields | “Match fields with the same meaning but different names across the two files.” | For example, determine whether `name` and `Stadtteil` represent the same concept. | Not implemented |
-| Join attribute tables | “Join the population table to the administrative boundaries.” | The datasets need to be matched using a common field. | Not implemented |
-| Query distances | “Find bus stops within 500 meters of schools.” “Calculate the distance from each school to its nearest bus stop.” | Some feature-distance calculations and queries are supported. | Partially implemented |
-| Query spatial relationships | “Determine which administrative area each school belongs to.” “Check whether buildings intersect the flood area.” | Complex spatial relationship queries and joins are not yet complete. | Partially implemented |
-| Filter by attributes or time | “Filter for accidents from the last three years.” “Select only one type of restaurant.” | General natural-language filtering is not implemented. | Not implemented |
-| Buffer analysis | “Create buffers at a specified distance around schools, parks, or candidate locations.” | Some buffer scenarios are supported. | Partially implemented |
-| Spatial overlay analysis | “Find residential areas close to parks and far from roads.” “Calculate the area of green space gained or lost.” | Complex overlays involving multiple layers are not implemented. | Not implemented |
-| Manage derived data | “Save the data produced by the analysis while keeping the original layers.” | Independent management of analysis results and source data is not yet complete. | Partially implemented |
-| Spatial density and hotspot detection | “Identify high-density areas from the distribution of bicycle accidents.” | Some area or density calculations are available, but the hotspot workflow is not complete. | Partially implemented |
+| Check and transform coordinate reference systems | “Check the CRS of my datasets.” “Transform the school dataset to EPSG:32632.” | CRS checks are supported. A target CRS must be specified for transformation; unknown source CRS values are not guessed, and the source is preserved. | Implemented |
+| Check data quality | “Check the data for missing coordinates, anomalous records, and invalid geometries.” | Reports issue counts; it does not repair data. | Implemented |
+| Match semantically equivalent fields | “Find fields that may refer to the same concept, such as `name` and `Stadtteil`.” | Suggests candidates from field-name patterns and value overlap; full synonym and cross-language understanding is not supported. | Partially implemented |
+| Join attribute tables | “Match the population table to the administrative boundaries using a common field.” | Creates temporary field mappings and reports matched, unmatched, and duplicate keys; it does not merge fields into a new dataset. | Implemented |
+| Query distances | “Find schools with no bus stop within 500 meters.” “Calculate the distance from each school to its nearest bus stop.” | Supports within-layer pair distances, cross-layer nearest-neighbor and threshold queries, using a spatial index. Returns a text summary and distance table; it does not automatically create a filtered result layer. | Implemented |
+| Query spatial relationships | “Assign each school to an administrative area.” “Check whether buildings intersect the flood area.” | Supports point-in-polygon and intersects queries, reports matches, nonmatches, and multiple matches, and creates a result layer. | Implemented |
+| Filter by attributes or time | “Filter for accidents from the last three years.” “Select only one type of restaurant.” | Supports category, numeric, and date conditions. The filtered features are added as a new layer; source data is unchanged. | Implemented |
+| Buffer analysis | “Create a 500-meter buffer around schools, parks, or candidate locations.” | Supports point, line, and polygon buffers, calculated in a local UTM CRS with distance and geometry checks. | Implemented |
+| Spatial overlay analysis | “Find areas close to parks and far from roads.” “Compare two green-space layers.” | Supports polygon intersection, difference, union, and symmetric difference; operations can be combined in sequence. | Implemented |
+| Manage derived data | “Keep analysis results as new data while preserving the source layers.” | Analyses can create session datasets or map layers. Visible vector layers can be exported as GeoJSON; a general save-and-manage workflow is not available. | Implemented |
+| Spatial density and hotspot detection | “Identify high-density areas from the distribution of bicycle accidents.” | Counts points in a grid; defaults to 500-meter cells and marks hotspots at the 90th percentile of occupied cells. This is not a statistical significance test. | Implemented |
 
 #### Part 2: Map Creation
 
@@ -107,15 +107,15 @@ Proportional point and line maps exclude identifier fields such as house numbers
 
 #### Part 3: Statistical Analysis
 
-The statistical analysis module is still under development. The examples below describe planned tasks and may not yet be fully handled by the agent.
+The statistical analysis module is still being developed. The table below describes the current supported scope; cross-year change comparison remains in development.
 
-| Planned feature | Example request | Status |
+| Feature | Example request | Status |
 |---|---|---|
-| Count or aggregate by area | “Count the schools in each administrative area.” “Sum the population in each administrative area.” | Not implemented |
-| Calculate ratios or indicators | “Calculate the school coverage rate for each administrative area.” | Not implemented |
-| Compare area or change | “Calculate the green-space area in each administrative area.” “Compare the change in green-space area between two years.” | Not implemented |
-| Sort and return Top-N results | “List the five administrative areas with the highest unemployment rates.” | Not implemented |
-| Create and export a statistical table | “Create a statistical table by administrative area and export it as CSV.” | Not implemented |
+| Count or aggregate by area | “Count the schools in each administrative area.” “Sum the population in each administrative area.” | Implemented with `aggregate_features_by_area`; returns a table and reusable result layer. |
+| Calculate ratios or indicators | “Calculate the school coverage rate for each administrative area.” | Implemented with `calculate_derived_indicator` for row-wise numeric field ratios and scaled rates. |
+| Compare area or change | “Calculate the green-space area in each administrative area.” “Compare the change in green-space area between two years.” | Partially implemented: exact polygon intersection area by area is available; temporal comparison is not implemented. |
+| Sort and return Top-N results | “List the five administrative areas with the highest unemployment rates.” | Implemented with `rank_dataset_by_field`; returns a text table only. |
+| Create and export a statistical table | “Create a statistical table by administrative area and export it as CSV.” | Implemented with `export_statistical_table`; CSV is returned as a downloadable attachment. |
 
 ---
 
@@ -185,17 +185,17 @@ Laden Sie eine oder mehrere GeoJSON-, JSON- oder CSV-Dateien hoch und geben Sie 
 |---|---|---|---|
 | Daten hochladen und kombinieren | Laden Sie mehrere Dateien hoch und fragen Sie: „Analysiere bitte gemeinsam die hochgeladenen Schul-, Bushaltestellen- und Verwaltungsgrenzdaten.“ | Mehrere GeoJSON-, JSON- oder CSV-Dateien können in derselben Sitzung verwendet werden. | Implementiert |
 | Daten prüfen | „Welche Datensätze sind aktuell hochgeladen und welche Geometrietypen und Attribute enthalten sie?“ | Die Erkennung von Feldern hängt von den Daten ab. | Implementiert |
-| Koordinatenreferenzsysteme erkennen und transformieren | „Prüfe die Koordinatenreferenzsysteme dieser Datensätze und transformiere sie bei Bedarf.“ | Die Verfügbarkeit hängt von den Eingabedaten und der Analyse ab. | Implementiert |
-| Datenqualität prüfen | „Prüfe die Daten auf fehlende Koordinaten, auffällige Datensätze und ungültige Geometrien.“ | Die Datenqualitätsprüfung ist noch nicht vollständig. | Teilweise implementiert |
-| Semantisch gleichbedeutende Felder zuordnen | „Ordne Felder mit gleicher Bedeutung, aber unterschiedlichen Namen in den zwei Dateien einander zu.“ | Zum Beispiel feststellen, ob `name` und `Stadtteil` dasselbe Konzept bezeichnen. | Nicht implementiert |
-| Attributtabellen verknüpfen | „Verknüpfe die Bevölkerungstabelle mit den Verwaltungsgrenzen.“ | Die Datensätze müssen über ein gemeinsames Feld zugeordnet werden. | Nicht implementiert |
-| Distanzen abfragen | „Finde Bushaltestellen im Umkreis von 500 Metern um Schulen.“ „Berechne die Entfernung jeder Schule zur nächstgelegenen Bushaltestelle.“ | Einige Distanzberechnungen und Abfragen für Features werden unterstützt. | Teilweise implementiert |
-| Räumliche Beziehungen abfragen | „Bestimme, zu welchem Verwaltungsgebiet jede Schule gehört.“ „Prüfe, ob Gebäude das Überschwemmungsgebiet schneiden.“ | Komplexe Abfragen räumlicher Beziehungen und Verknüpfungen sind noch nicht vollständig. | Teilweise implementiert |
-| Nach Attributen oder Zeit filtern | „Filtere Unfälle aus den letzten drei Jahren.“ „Wähle nur eine bestimmte Restaurantart aus.“ | Allgemeine Filterung per natürlicher Sprache ist nicht implementiert. | Nicht implementiert |
-| Pufferanalyse | „Erstelle Puffer mit einem festgelegten Abstand um Schulen, Parks oder mögliche Standorte.“ | Einige Pufferszenarien werden unterstützt. | Teilweise implementiert |
-| Räumliche Overlay-Analyse | „Finde Wohngebiete in der Nähe von Parks und weit entfernt von Straßen.“ „Berechne die Fläche neu entstandener oder verlorener Grünflächen.“ | Komplexe Overlays mit mehreren Layern sind nicht implementiert. | Nicht implementiert |
-| Abgeleitete Daten verwalten | „Speichere die bei der Analyse erzeugten Daten und behalte gleichzeitig die ursprünglichen Layer.“ | Die getrennte Verwaltung von Analyseergebnissen und Quelldaten ist noch nicht vollständig. | Teilweise implementiert |
-| Räumliche Dichte und Hotspots erkennen | „Ermittle Gebiete mit hoher Dichte anhand der Verteilung von Fahrradunfällen.“ | Einige Flächen- und Dichteberechnungen sind verfügbar; der Hotspot-Workflow ist noch nicht vollständig. | Teilweise implementiert |
+| Koordinatenreferenzsysteme prüfen und transformieren | „Prüfe die CRS meiner Datensätze.“ „Transformiere den Schul-Layer nach EPSG:32632.“ | CRS-Prüfungen werden unterstützt. Für eine Transformation muss ein Ziel-CRS angegeben werden; unbekannte Quell-CRS werden nicht geraten, und die Quelle bleibt erhalten. | Implementiert |
+| Datenqualität prüfen | „Prüfe die Daten auf fehlende Koordinaten, auffällige Datensätze und ungültige Geometrien.“ | Meldet die Anzahl der Befunde; die Daten werden nicht automatisch repariert. | Implementiert |
+| Semantisch gleichbedeutende Felder erkennen | „Finde Felder mit möglicherweise gleicher Bedeutung, zum Beispiel `name` und `Stadtteil`.“ | Schlägt Kandidaten anhand von Feldnamensmustern und Wertüberschneidungen vor; vollständige Synonym- und Spracherkennung wird nicht unterstützt. | Teilweise implementiert |
+| Attributtabellen verknüpfen | „Ordne die Bevölkerungstabelle über ein gemeinsames Feld den Verwaltungsgrenzen zu.“ | Erstellt temporäre Feldzuordnungen und meldet passende, nicht passende und doppelte Schlüssel; Felder werden nicht in einen neuen Datensatz übernommen. | Implementiert |
+| Distanzen abfragen | „Finde Schulen ohne Bushaltestelle im Umkreis von 500 Metern.“ „Berechne die Entfernung jeder Schule zur nächsten Bushaltestelle.“ | Unterstützt paarweise Distanzen innerhalb eines Layers, layerübergreifende nächste Nachbarn und Umkreisabfragen; ein räumlicher Index beschleunigt die Suche. Ergebnis ist ein Textbericht mit Distanzangaben, kein automatisch gefilterter Layer. | Implementiert |
+| Räumliche Beziehungen abfragen | „Ordne jede Schule einem Verwaltungsgebiet zu.“ „Prüfe, ob Gebäude das Überschwemmungsgebiet schneiden.“ | Unterstützt Punkt-in-Polygon und Überschneidungen, meldet Treffer, Nichttreffer und Mehrfachtreffer und erstellt einen Ergebnislayer. | Implementiert |
+| Nach Attributen oder Zeit filtern | „Filtere Unfälle aus den letzten drei Jahren.“ „Wähle nur eine bestimmte Restaurantart aus.“ | Unterstützt Kategorien, Zahlen- und Datumsbedingungen. Die Treffer werden als neuer Layer hinzugefügt; die Quelldaten bleiben unverändert. | Implementiert |
+| Pufferanalyse | „Erstelle einen 500-Meter-Puffer um Schulen, Parks oder mögliche Standorte.“ | Unterstützt Puffer um Punkte, Linien und Flächen; Berechnung im lokalen UTM-CRS mit Distanz- und Geometrieprüfung. | Implementiert |
+| Räumliche Overlay-Analyse | „Finde Gebiete in der Nähe von Parks und weit entfernt von Straßen.“ „Vergleiche zwei Grünflächen-Layer.“ | Unterstützt Schnittmenge, Differenz, Vereinigung und symmetrische Differenz von Polygonen; Operationen können nacheinander kombiniert werden. | Implementiert |
+| Abgeleitete Daten verwalten | „Speichere Analyseergebnisse als neue Daten und behalte die Quell-Layer.“ | Analysen können Sitzungsdatensätze oder Kartenlayer erstellen. Sichtbare Vektorlayer lassen sich als GeoJSON exportieren; eine allgemeine Speicher- und Verwaltungsfunktion gibt es nicht. | Implementiert |
+| Räumliche Dichte und Hotspots erkennen | „Ermittle Gebiete mit hoher Dichte anhand der Verteilung von Fahrradunfällen.“ | Zählt Punkte in einem Raster; Standard sind 500-Meter-Zellen und die Markierung des 90. Perzentils belegter Zellen. Kein Test auf statistische Signifikanz. | Implementiert |
 
 #### Teil 2: Kartenerstellung
 
@@ -228,15 +228,15 @@ Proportionale Punkt- und Linienkarten schließen Kennungsfelder wie Hausnummern 
 
 #### Teil 3: Statistische Analyse
 
-Das Statistikmodul befindet sich noch in Entwicklung. Die folgenden Beispiele beschreiben geplante Aufgaben und können derzeit möglicherweise nicht vollständig ausgeführt werden.
+Das Statistikmodul wird weiterentwickelt. Die Tabelle zeigt den aktuellen Umfang; der Vergleich von Veränderungen zwischen Jahren befindet sich noch in Entwicklung.
 
-| Geplante Funktion | Beispielanfrage | Status |
+| Funktion | Beispielanfrage | Status |
 |---|---|---|
-| Nach Gebiet zählen oder aggregieren | „Zähle die Schulen in jedem Verwaltungsgebiet.“ „Summiere die Bevölkerung je Verwaltungsgebiet.“ | Nicht implementiert |
-| Verhältnisse oder Kennzahlen berechnen | „Berechne die Schulversorgungsquote für jedes Verwaltungsgebiet.“ | Nicht implementiert |
-| Flächen oder Veränderungen vergleichen | „Berechne die Grünflächen je Verwaltungsgebiet.“ „Vergleiche die Veränderung der Grünflächen zwischen zwei Jahren.“ | Nicht implementiert |
-| Sortieren und Top-N abfragen | „Liste die fünf Verwaltungsgebiete mit der höchsten Arbeitslosenquote auf.“ | Nicht implementiert |
-| Statistische Tabelle erstellen und exportieren | „Erstelle eine Statistik nach Verwaltungsgebiet und exportiere sie als CSV.“ | Nicht implementiert |
+| Nach Gebiet zählen oder aggregieren | „Zähle die Schulen in jedem Verwaltungsgebiet.“ „Summiere die Bevölkerung je Verwaltungsgebiet.“ | Implementiert: Zählung oder Summe je Polygongebiet, mit Tabelle und wiederverwendbarem Ergebnislayer. |
+| Verhältnisse oder Kennzahlen berechnen | „Berechne die Schulversorgungsquote für jedes Verwaltungsgebiet.“ | Implementiert: berechnet zeilenweise Kennzahlen aus vorhandenen numerischen Feldern und einem Skalierungsfaktor. |
+| Flächen oder Veränderungen vergleichen | „Berechne die Grünflächen je Verwaltungsgebiet.“ „Vergleiche die Veränderung der Grünflächen zwischen zwei Jahren.“ | Teilweise implementiert: Polygonflächen werden an Gebietsgrenzen geschnitten und je Gebiet summiert; der Jahresvergleich ist nicht implementiert. |
+| Sortieren und Top-N abfragen | „Liste die fünf Verwaltungsgebiete mit der höchsten Arbeitslosenquote auf.“ | Implementiert: sortiert nach einem numerischen Feld und gibt eine Rangtabelle als Text zurück. |
+| Statistische Tabelle erstellen und exportieren | „Erstelle eine Statistik nach Verwaltungsgebiet und exportiere sie als CSV.“ | Implementiert: CSV wird als herunterladbarer Anhang bereitgestellt. |
 
 ---
 
@@ -306,17 +306,17 @@ $env:DEEPSEEK_API_KEY = "<your-api-key>"
 |---|---|---|---|
 | 上传并组合数据 | 上传多个文件后询问：“请同时使用我上传的学校、公交站和行政区数据进行分析。” | 支持在同一会话中使用多个 GeoJSON、JSON 或 CSV 文件。 | 已实现 |
 | 查看数据情况 | “请说明当前上传了哪些数据，以及每个数据包含什么几何类型和属性。” | 字段识别效果取决于数据内容。 | 已实现 |
-| 坐标系识别与转换 | “检查这些数据的坐标系，并在需要时进行转换。” | 具体可用性取决于输入数据及分析场景。 | 已实现 |
-| 数据质量检查 | “检查数据中的缺失坐标、异常记录和无效几何。” | 数据质量验证能力尚不完整。 | 部分实现 |
-| 语义字段匹配 | “匹配两个文件中含义相同但名称不同的字段。” | 例如识别 `name` 与 `Stadtteil` 是否表示同一含义。 | 未实现 |
-| 属性表关联 | “将人口统计表关联到行政区边界。” | 需要根据共同字段匹配数据集。 | 未实现 |
-| 距离查询 | “查询学校附近 500 米内的公交站。”“计算每所学校到最近公交站的距离。” | 目前支持部分要素距离计算和查询场景。 | 部分实现 |
-| 空间关系查询 | “判断每所学校属于哪个行政区。”“检查建筑是否与淹没区域相交。” | 复杂空间关系判断和关联尚不完整。 | 部分实现 |
-| 属性与时间筛选 | “筛选最近三年的事故。”“只选择某一类餐厅。” | 通用自然语言筛选尚未实现。 | 未实现 |
-| 缓冲区分析 | “为学校、公园或候选地址生成指定距离的缓冲区。” | 当前支持部分缓冲区场景。 | 部分实现 |
-| 空间叠置分析 | “找出靠近公园、远离道路的住宅区域。”“计算绿地增减范围。” | 需要组合多个图层进行复杂叠置分析。 | 未实现 |
-| 派生数据管理 | “保存分析生成的新数据，同时保留原始图层。” | 分析结果和源数据的独立管理能力尚不完整。 | 部分实现 |
-| 空间密度与热点识别 | “根据自行车事故分布识别高密度区域。” | 当前有部分面积或密度计算能力，热点识别工作流尚未完整。 | 部分实现 |
+| 坐标系检查与转换 | “检查各数据集的 CRS。”“将学校图层转换为 EPSG:32632。” | 支持检查 CRS；转换时需指定目标 CRS。源 CRS 未知时不会猜测，原数据保留。 | 已实现 |
+| 数据质量检查 | “检查数据中的缺失坐标、异常记录和无效几何。” | 汇报问题数量，不自动修复数据。 | 已实现 |
+| 语义字段匹配 | “找出两个文件中含义可能相同但名称不同的字段。” | 可根据字段名称格式及字段值重合度提出候选；尚不支持完整的同义词或跨语言语义识别。 | 部分实现 |
+| 属性表关联 | “根据共同字段将人口统计表与行政区边界匹配。” | 建立临时字段对应关系，汇报匹配、未匹配和重复键；不会合并字段生成新数据集。 | 已实现 |
+| 距离查询 | “找出 500 米内没有公交站的学校。”“计算每所学校到最近公交站的距离。” | 支持单图层两两距离、跨图层最近邻和阈值范围查询，并使用空间索引。结果以文字和距离表汇报，不自动生成筛选结果图层。 | 已实现 |
+| 空间关系查询 | “判断每所学校属于哪个行政区。”“检查建筑是否与淹没区域相交。” | 支持点归属面和相交判断，汇报匹配、未匹配和多重匹配，并生成结果图层。 | 已实现 |
+| 属性与时间筛选 | “筛选最近三年的事故。”“只选择某一类餐厅。” | 支持类别、数值和日期条件；筛选结果生成新图层，原数据不变。 | 已实现 |
+| 缓冲区分析 | “为学校、公园或候选地址生成 500 米缓冲区。” | 支持点、线、面缓冲；采用本地 UTM 坐标系计算，并检查距离和几何。 | 已实现 |
+| 空间叠置分析 | “找出靠近公园、远离道路的区域。”“比较两个绿地图层。” | 支持面图层相交、差集、并集和对称差集；Agent 可顺序组合操作。 | 已实现 |
+| 派生数据管理 | “将分析结果保存为新数据，同时保留源图层。” | 多种分析会在当前会话中生成新数据集或图层；可将可见矢量图层导出为 GeoJSON，尚无通用的独立保存与管理流程。 | 已实现 |
+| 空间密度与热点识别 | “根据自行车事故分布识别高密度区域。” | 支持点数据网格计数；默认 500 米网格，按占用网格的第 90 百分位标记热点。这不是统计显著性检验。 | 已实现 |
 
 #### 第二部分：地图制作
 
@@ -349,12 +349,12 @@ $env:DEEPSEEK_API_KEY = "<your-api-key>"
 
 #### 第三部分：统计分析
 
-统计分析模块仍在开发中，以下示例用于说明计划支持的任务，目前不保证 Agent 能完整执行。
+统计分析模块仍在开发中，以下表格说明当前支持范围；跨年份变化比较等能力仍在开发。
 
-| 计划功能 | 请求示例 | 实现状态 |
+| 功能 | 请求示例 | 实现状态 |
 |---|---|---|
-| 按区域计数或汇总 | “统计每个行政区内的学校数量。”“汇总每个行政区的人口。” | 未实现 |
-| 计算比例或指标 | “计算各行政区的学校覆盖率。” | 未实现 |
-| 比较面积或变化 | “计算各行政区的绿地面积。”“比较两个年份的绿地面积变化。” | 未实现 |
-| 排序和 Top-N 查询 | “列出失业率最高的五个行政区。” | 未实现 |
-| 生成并导出统计表 | “生成行政区统计表并导出为 CSV。” | 未实现 |
+| 按区域计数或汇总 | “统计每个行政区内的学校数量。”“汇总每个行政区的人口。” | 已实现：支持基于面区域计数或求和，返回统计表和可复用结果图层。 |
+| 计算比例或指标 | “计算各行政区的学校覆盖率。” | 已实现：支持对已有数值字段逐行计算比值及按比例因子缩放的率。 |
+| 比较面积或变化 | “计算各行政区的绿地面积。”“比较两个年份的绿地面积变化。” | 部分实现：可裁切并汇总各区内的多边形面积；跨年份变化比较尚未实现。 |
+| 排序和 Top-N 查询 | “列出失业率最高的五个行政区。” | 已实现：按指定数值字段排序并以文本表格返回，不创建新图层。 |
+| 生成并导出统计表 | “生成行政区统计表并导出为 CSV。” | 已实现：CSV 作为可下载附件返回，可选择属性字段，几何不导出。 |
